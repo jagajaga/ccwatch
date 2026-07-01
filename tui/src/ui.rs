@@ -81,20 +81,6 @@ fn host_breakdown(app: &App) -> String {
         .join(" · ")
 }
 
-fn host_tag(host: &Host) -> Option<Span<'static>> {
-    match host {
-        Host::Local => None,
-        Host::Remote { name, .. } => Some(Span::styled(
-            format!("{name} "),
-            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-        )),
-        Host::Cloud => Some(Span::styled(
-            "☁ cloud ",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        )),
-    }
-}
-
 fn draw_alerts(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -133,14 +119,43 @@ fn alert_line(a: &Alert) -> Line<'static> {
     ])
 }
 
+/// Fixed column widths for the session/agent grid — every row pads to these,
+/// so columns stay aligned no matter how long a name, host, or token figure is.
+const W_NAME: usize = 24; // includes the 2-char expand marker
+const W_HOST: usize = 13;
+const W_STATE: usize = 8;
+const W_UP: usize = 8;
+const W_TPM: usize = 8;
+const W_BREAKDOWN: usize = 27;
+const W_CPU: usize = 5;
+const W_RSS: usize = 6;
+
+/// Truncate-and-pad to an exact width (left-aligned).
+fn cell(s: &str, w: usize) -> String {
+    format!("{:<w$}", truncate(s, w.saturating_sub(1)), w = w)
+}
+
+/// Truncate-and-pad to an exact width (right-aligned, one trailing space).
+fn cell_r(s: &str, w: usize) -> String {
+    format!("{:>w$} ", truncate(s, w.saturating_sub(1)), w = w.saturating_sub(1))
+}
+
 fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     let rows = app.visible_rows();
+    let header = format!(
+        "{}{}{}{}{}{}{}{}model",
+        cell("  name/desc", W_NAME),
+        cell("host", W_HOST),
+        cell("state", W_STATE),
+        cell("up", W_UP),
+        cell_r("tok/min", W_TPM),
+        cell("in/out/cw/cr", W_BREAKDOWN),
+        cell_r("cpu", W_CPU),
+        cell_r("rss", W_RSS),
+    );
     let block = Block::default().borders(Borders::ALL).title(Line::from(vec![
         Span::raw(" SESSIONS / AGENTS "),
-        Span::styled(
-            "  name/desc            state   up      tok/min  in/out/cw/cr        cpu   rss ",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(header, Style::default().fg(Color::DarkGray)),
     ]));
     let inner_h = area.height.saturating_sub(2) as usize;
     let start = if app.selected >= inner_h {
@@ -181,7 +196,7 @@ fn state_span(state: SessionState) -> Span<'static> {
         SessionState::Idle => ("idle", Color::DarkGray),
         SessionState::Ended => ("ended", Color::DarkGray),
     };
-    Span::styled(format!("{txt:<8}"), Style::default().fg(color))
+    Span::styled(cell(txt, W_STATE), Style::default().fg(color))
 }
 
 fn burn_span(tpm: f64, threshold: f64) -> Span<'static> {
@@ -192,7 +207,21 @@ fn burn_span(tpm: f64, threshold: f64) -> Span<'static> {
     } else {
         Color::Gray
     };
-    Span::styled(format!("{:>7}", format::rate(tpm)), Style::default().fg(color))
+    Span::styled(cell_r(&format::rate(tpm), W_TPM), Style::default().fg(color))
+}
+
+fn host_cell(host: &Host) -> Span<'static> {
+    match host {
+        Host::Local => Span::styled(cell("local", W_HOST), Style::default().fg(Color::DarkGray)),
+        Host::Remote { name, .. } => Span::styled(
+            cell(name, W_HOST),
+            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        ),
+        Host::Cloud => Span::styled(
+            cell("cloud", W_HOST),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ),
+    }
 }
 
 fn session_line(s: &Session, app: &App) -> Line<'static> {
@@ -221,25 +250,20 @@ fn session_line(s: &Session, app: &App) -> Line<'static> {
     } else {
         "▸ "
     };
-    let mut spans = vec![Span::raw(expand)];
-    if let Some(tag) = host_tag(&s.host) {
-        spans.push(tag);
-    }
-    spans.extend([
+    Line::from(vec![
         Span::styled(
-            format!("{:<20}", truncate(&s.name, 20)),
+            cell(&format!("{expand}{}", s.name), W_NAME),
             Style::default().add_modifier(Modifier::BOLD),
         ),
+        host_cell(&s.host),
         state_span(s.state),
-        Span::raw(format!("{up:<8}")),
+        Span::raw(cell(&up, W_UP)),
         burn_span(s.tokens_per_min, BURN_RED),
-        Span::raw("  "),
-        Span::styled(format!("{breakdown:<18}"), Style::default().fg(Color::DarkGray)),
-        Span::raw(format!(" {:>3.0}% ", s.cpu_pct)),
-        Span::raw(format!("{:>4}M", s.rss_mb)),
-        Span::styled(format!("  [{model}]"), Style::default().fg(Color::DarkGray)),
-    ]);
-    Line::from(spans)
+        Span::styled(cell(&breakdown, W_BREAKDOWN), Style::default().fg(Color::DarkGray)),
+        Span::raw(cell_r(&format!("{:.0}%", s.cpu_pct), W_CPU)),
+        Span::raw(cell_r(&format!("{}M", s.rss_mb), W_RSS)),
+        Span::styled(format!("[{model}]"), Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 fn agent_line(a: Option<&ccwatch_core::model::Agent>, depth: usize, app: &App) -> Line<'static> {
@@ -262,15 +286,14 @@ fn agent_line(a: Option<&ccwatch_core::model::Agent>, depth: usize, app: &App) -
         .started_at
         .map(|t| format::ago(t, app.now_ms))
         .unwrap_or_else(|| "-".into());
+    // The name area spans the NAME + HOST columns, so agent rows keep the
+    // state/up columns aligned with session rows.
+    let name_area = W_NAME + W_HOST;
+    let label = format!("{indent}{branch}{} [{}]", a.description, a.subagent_type);
     Line::from(vec![
-        Span::styled(format!("{indent}{branch}"), Style::default().fg(Color::Blue)),
-        Span::styled(
-            format!("{} ", truncate(&a.description, 26)),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(format!("[{}] ", a.subagent_type), Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{st:<8}"), Style::default().fg(color)),
-        Span::styled(up, Style::default().fg(Color::DarkGray)),
+        Span::styled(cell(&label, name_area), Style::default().fg(Color::Cyan)),
+        Span::styled(cell(st, W_STATE), Style::default().fg(color)),
+        Span::styled(cell(&up, W_UP), Style::default().fg(Color::DarkGray)),
     ])
 }
 
@@ -735,6 +758,49 @@ mod tests {
             .join("docs");
         std::fs::create_dir_all(&docs).unwrap();
         std::fs::write(docs.join("screenshot-tui.svg"), svg).unwrap();
+    }
+
+    #[test]
+    fn columns_align_across_local_and_remote_rows() {
+        // A short-named local row, a long-named local row, and a remote row
+        // with a long host — the state/tok columns must start at identical x.
+        let mut long = session("s2", "a-very-long-session-name-here", vec![]);
+        long.state = ccwatch_core::model::SessionState::Idle;
+        let mut remote = session("s3", "remote-worker", vec![]);
+        remote.host = ccwatch_core::model::Host::Remote {
+            name: "very-long-hostname-xyz".into(),
+            ssh_target: "u@h".into(),
+        };
+        remote.state = ccwatch_core::model::SessionState::Idle;
+        let snap = snapshot(vec![session("s1", "tiny", vec![]), long, remote]);
+        let app = app_with(snap);
+        let screen = render(&app);
+        // Only session rows (identified by their model tag) — the footer help
+        // text also contains the word "idle".
+        let lines: Vec<&str> = screen
+            .lines()
+            .filter(|l| l.contains("[opus-4-8]"))
+            .collect();
+        assert_eq!(lines.len(), 3, "expected 3 session rows\n{screen}");
+
+        // Character columns, not byte offsets — rows contain multi-byte
+        // glyphs (▸, …) before the state column.
+        let col = |needle: &str| -> Vec<usize> {
+            lines
+                .iter()
+                .filter_map(|l| l.find(needle).map(|b| l[..b].chars().count()))
+                .collect()
+        };
+        // All three rows show a state word; every occurrence must share one x.
+        let mut positions = col("running ");
+        positions.extend(col("idle "));
+        positions.sort_unstable();
+        positions.dedup();
+        assert_eq!(
+            positions.len(),
+            1,
+            "state column misaligned, offsets {positions:?}\n{screen}"
+        );
     }
 
     #[test]
