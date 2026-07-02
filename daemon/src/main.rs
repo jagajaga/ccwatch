@@ -121,7 +121,7 @@ fn main() -> anyhow::Result<()> {
         let remote_cache = remote_cache.clone();
         let remote_errors = manager.errors();
         let learned_path = paths.ccwatch_dir().join("learned.json");
-        let mut learned: Option<u64> = load_learned(&learned_path);
+        let mut learned = load_learned(&learned_path);
         let mut build = move |engine: &mut Engine| {
             let local = engine.refresh_now();
             let remotes = remote_cache.read().unwrap().clone();
@@ -137,18 +137,23 @@ fn main() -> anyhow::Result<()> {
                 });
             }
 
-            // Governor: calibrate the ceiling from observed 429s, then compute.
+            // Governor: calibrate the ceiling. Confirmed walls (429+blackout)
+            // SET the budget — up or down, so plan downgrades self-correct;
+            // transient 429s and observed usage only raise it.
             let window_ms = config.governor_window_hours * 3_600_000;
-            if let Some(est) = ccwatch_core::governor::learn_budget(
+            let updated = ccwatch_core::governor::learn(
                 &snap.usage_buckets,
                 &snap.rate_limits,
                 window_ms,
-            ) {
-                if learned.map(|l| est > l).unwrap_or(true) {
-                    learned = Some(est);
+                snap.generated_at,
+                learned,
+            );
+            if updated != learned {
+                learned = updated;
+                if let Some(l) = &learned {
                     let _ = std::fs::write(
                         &learned_path,
-                        format!("{{\"window_budget_learned\":{est}}}"),
+                        serde_json::to_string(l).unwrap_or_default(),
                     );
                 }
             }
@@ -157,7 +162,7 @@ fn main() -> anyhow::Result<()> {
                 &snap.rate_limits,
                 snap.generated_at,
                 &config,
-                learned,
+                learned.map(|l| l.tokens),
             );
             if let Some(alert) = ccwatch_core::governor::wall_alert(&g, snap.generated_at) {
                 snap.alerts.push(alert);
@@ -385,14 +390,26 @@ fn send(writer: &mut UnixStream, msg: &ServerMsg) -> std::io::Result<()> {
     writer.flush()
 }
 
-/// Read the persisted learned window budget (`{"window_budget_learned":N}`).
-fn load_learned(path: &std::path::Path) -> Option<u64> {
+/// Read the persisted learned budget. Understands both the current
+/// `LearnedBudget` format and the legacy `{"window_budget_learned":N}`
+/// (migrated as soft evidence so a confirmed wall can lower it).
+fn load_learned(path: &std::path::Path) -> Option<ccwatch_core::governor::LearnedBudget> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<serde_json::Value>(&text)
+    if let Ok(l) = serde_json::from_str::<ccwatch_core::governor::LearnedBudget>(&text) {
+        return Some(l);
+    }
+    let legacy = serde_json::from_str::<serde_json::Value>(&text)
         .ok()?
         .get("window_budget_learned")?
-        .as_u64()
+        .as_u64()?;
+    Some(ccwatch_core::governor::LearnedBudget {
+        tokens: legacy,
+        hard: false,
+        at_ms: 0,
+    })
 }
+
+
 
 fn read_pidfile(paths: &Paths) -> Option<i32> {
     std::fs::read_to_string(paths.pidfile())
@@ -414,5 +431,28 @@ fn log_action(paths: &Paths, req: &ActionRequest, ok: bool, message: &str) {
             "{ts}\t{}\tok={ok}\t{message}",
             serde_json::to_string(req).unwrap_or_default()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_learned;
+
+    #[test]
+    fn load_learned_reads_both_formats() {
+        let dir = std::env::temp_dir().join(format!("ccw-learn-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("learned.json");
+
+        std::fs::write(&p, r#"{"window_budget_learned":23713076}"#).unwrap();
+        let l = load_learned(&p).unwrap();
+        assert_eq!(l.tokens, 23_713_076);
+        assert!(!l.hard, "legacy value is soft so a wall can lower it");
+
+        std::fs::write(&p, r#"{"tokens":12000000,"hard":true,"at_ms":5}"#).unwrap();
+        let l = load_learned(&p).unwrap();
+        assert_eq!((l.tokens, l.hard, l.at_ms), (12_000_000, true, 5));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

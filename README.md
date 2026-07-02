@@ -27,8 +27,9 @@ ccwatch already knows. It was watching.
 ## Features
 
 - ⛽ **The Governor** — a fuel gauge that **learns your real plan limit from
-  your own 429s**. `▲2.1×` = hitting the wall 40 min before reset. `▼0.6×` =
-  coast home. Zero config.
+  your own 429s** — and re-measures it on every confirmed wall, so plan
+  upgrades *and downgrades* self-correct. `▲2.1×` = hitting the wall 40 min
+  before reset. `▼0.6×` = coast home. Zero config.
 - 🖥 **Fleet view** — all sessions, all machines: burn rate, tokens, cpu/ram,
   last activity, the same titles Claude's UI uses
 - 🔍 **Live activity** — `✎ Edit engine.rs` · `⚙ cargo build 87%` — in-flight

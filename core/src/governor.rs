@@ -12,6 +12,7 @@
 
 use crate::config::Config;
 use crate::model::{Alert, AlertKind, BudgetSource, GovernorStatus, Severity, Tank};
+use serde::{Deserialize, Serialize};
 
 pub const BUCKET_MS: i64 = 5 * 60 * 1000;
 /// Delta ceiling: JSON cannot represent infinity (serde encodes it as null),
@@ -260,17 +261,85 @@ pub fn wall_alert(g: &GovernorStatus, now_ms: i64) -> Option<Alert> {
     })
 }
 
-/// Estimate the plan-window budget from observed 429 bursts: for each
-/// rate-limit event, the usage accumulated in its window at that moment is a
-/// lower bound on the ceiling. The max over events is the best estimate.
-pub fn learn_budget(buckets: &[(i64, u64)], rate_limit_ts: &[i64], window_ms: i64) -> Option<u64> {
-    let mut best = None;
-    for &ts in rate_limit_ts {
-        if let Some(start) = window_start(buckets, rate_limit_ts, ts, window_ms) {
-            let used = sum_range(buckets, start, ts);
-            if used > 0 && best.map(|b| used > b).unwrap_or(true) {
-                best = Some(used);
+/// The persisted budget estimate. `hard` means it was *measured* at a
+/// confirmed wall (429 + blackout); soft evidence only bounds from below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnedBudget {
+    pub tokens: u64,
+    pub hard: bool,
+    /// When the evidence was observed (epoch ms) — newest hard wall wins.
+    pub at_ms: i64,
+}
+
+/// Update the budget estimate from the recent horizon. The rules make plan
+/// changes self-correcting in both directions:
+///
+/// - a **confirmed wall** (429 followed by ≥30 min of silence) *measures* the
+///   budget: the newest wall SETS it — up or **down** (plan downgrades);
+/// - a transient 429 or plain observed usage can only RAISE it (you provably
+///   had at least that much) — never lower it.
+pub fn learn(
+    buckets: &[(i64, u64)],
+    rate_limits: &[i64],
+    window_ms: i64,
+    now_ms: i64,
+    prev: Option<LearnedBudget>,
+) -> Option<LearnedBudget> {
+    let mut best = prev;
+    let mut rls: Vec<i64> = rate_limits.to_vec();
+    rls.sort_unstable();
+
+    for &rl in &rls {
+        if rl > now_ms {
+            continue;
+        }
+        let resume = buckets
+            .iter()
+            .find(|(ts, v)| *v > 0 && *ts > bucket_of(rl))
+            .map(|(ts, _)| *ts);
+        let hard = match resume {
+            Some(r) => r - rl >= LIMIT_BLACKOUT_MS,
+            None => now_ms - rl >= LIMIT_BLACKOUT_MS, // still blacked out
+        };
+        // Usage of the window that was active when the 429 fired; anchor it
+        // only with boundaries that existed before this event.
+        let prior: Vec<i64> = rls.iter().copied().filter(|t| *t < rl).collect();
+        let Some(start) = window_start(buckets, &prior, rl, window_ms) else {
+            continue;
+        };
+        let used = sum_range(buckets, start, rl);
+        if used == 0 {
+            continue;
+        }
+        if hard {
+            let newer = best.map(|b| !b.hard || rl > b.at_ms).unwrap_or(true);
+            if newer {
+                best = Some(LearnedBudget {
+                    tokens: used,
+                    hard: true,
+                    at_ms: rl,
+                });
             }
+        } else if best.map(|b| used > b.tokens).unwrap_or(true) {
+            // Transient 429: a lower bound only.
+            let at = best.map(|b| b.at_ms).unwrap_or(rl);
+            let hard_kept = false;
+            best = Some(LearnedBudget {
+                tokens: used,
+                hard: hard_kept,
+                at_ms: at,
+            });
+        }
+    }
+
+    // If the current window's usage exceeds the estimate, the estimate was
+    // too small (e.g. after a plan upgrade with no wall hit yet).
+    if let Some(start) = window_start(buckets, &rls, now_ms, window_ms) {
+        let used = sum_range(buckets, start, now_ms);
+        match &mut best {
+            Some(b) if used > b.tokens => b.tokens = used,
+            None if used > 0 => {} // usage alone isn't a budget estimate
+            _ => {}
         }
     }
     best
@@ -408,18 +477,54 @@ mod tests {
 
     #[test]
     fn learned_budget_from_429s() {
-        // 429 fired 30 min ago, when the window (anchored 2h ago) had
-        // accumulated 450k. That's the observed ceiling.
-        let b = buckets(&[(120, 450_000), (2, 50_000)]);
+        // Transient 429 30 min ago at 450k window usage → soft lower bound
+        // (work resumed 5 min later — a different bucket, no blackout).
+        let b = buckets(&[(120, 450_000), (25, 50_000)]);
         let rl = vec![NOW - 30 * 60_000];
-        assert_eq!(learn_budget(&b, &rl, 5 * H), Some(450_000));
+        let learned = learn(&b, &rl, 5 * H, NOW, None).unwrap();
+        assert_eq!(learned.tokens, 500_000, "current usage raises the bound");
+        assert!(!learned.hard, "no blackout → soft evidence");
 
         // Learned feeds the tank when config has no budget.
         let mut c = cfg();
         c.governor_window_budget = None;
-        let g = compute(&b, &rl, NOW, &c, Some(450_000));
-        assert_eq!(g.window.budget, Some(450_000));
+        let g = compute(&b, &rl, NOW, &c, Some(learned.tokens));
+        assert_eq!(g.window.budget, Some(500_000));
         assert_eq!(g.window.budget_source, BudgetSource::Learned);
+    }
+
+    #[test]
+    fn plan_downgrade_lowers_budget_on_confirmed_wall() {
+        // Old plan: burned 20M, hit a wall (429 + 65min blackout) 265m ago.
+        // New (downgraded) plan: resumed 200m ago, burned only 12M, hit a
+        // wall again 168m ago, blacked out since. The newest confirmed wall
+        // must SET the budget DOWN to 12M.
+        let b = buckets(&[
+            (290, 8_000_000),
+            (275, 12_000_000), // 20M by the first wall
+            (200, 5_000_000),
+            (180, 7_000_000), // 12M by the second wall
+        ]);
+        let rls = vec![NOW - 265 * 60_000, NOW - 168 * 60_000];
+
+        // Even starting from a stale, too-big estimate:
+        let prev = Some(LearnedBudget { tokens: 23_700_000, hard: true, at_ms: NOW - 3000 * 60_000 });
+        let learned = learn(&b, &rls, 5 * H, NOW, prev).unwrap();
+        assert_eq!(learned.tokens, 12_000_000, "downgrade must lower the budget");
+        assert!(learned.hard);
+        assert_eq!(learned.at_ms, NOW - 168 * 60_000);
+
+        // A later transient 429 at tiny usage must NOT lower it further.
+        let b2 = buckets(&[(20, 300_000), (16, 100_000)]);
+        let rl2 = vec![NOW - 18 * 60_000]; // resumed 2 min later → soft
+        let after = learn(&b2, &rl2, 5 * H, NOW, Some(learned)).unwrap();
+        assert_eq!(after.tokens, 12_000_000, "soft 429 never lowers");
+        assert!(after.hard);
+
+        // But usage EXCEEDING the estimate raises it (plan upgraded).
+        let b3 = buckets(&[(60, 14_000_000)]);
+        let up = learn(&b3, &[], 5 * H, NOW, Some(learned)).unwrap();
+        assert_eq!(up.tokens, 14_000_000, "observed usage raises the floor");
     }
 
     #[test]
