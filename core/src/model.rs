@@ -112,10 +112,15 @@ pub struct Agent {
     pub state: AgentState,
     /// Transcript timestamp (ms epoch) of the launching tool call.
     pub started_at: Option<i64>,
-    /// Best-effort tokens attributed to this agent (0 when the subagent runs
-    /// out-of-transcript, which is common).
+    /// Tokens attributed to this agent, read from its own sidechain
+    /// transcript (`<session>/subagents/agent-*.jsonl`).
     pub tokens: TokenLedger,
     pub tokens_per_min: f64,
+    /// What the agent is doing right now (its in-flight tool calls).
+    #[serde(default)]
+    pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub last_activity: Option<i64>,
     /// Nested agents this agent spawned.
     pub children: Vec<Agent>,
 }

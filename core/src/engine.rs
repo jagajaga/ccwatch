@@ -41,23 +41,73 @@ struct AgentAccum {
 }
 
 impl AgentAccum {
-    fn to_model(&self) -> Agent {
+    fn to_model(
+        &self,
+        data: &HashMap<String, AgentData>,
+        now_ms: i64,
+        rate_window_secs: i64,
+    ) -> Agent {
+        let d = data.get(&self.id);
+        let tokens = d.map(|d| d.ledger).unwrap_or_default();
+        let tokens_per_min = d
+            .map(|d| {
+                let cutoff = now_ms - rate_window_secs * 1000;
+                let sum: u64 = d
+                    .events
+                    .iter()
+                    .filter(|e| e.ts_ms >= cutoff)
+                    .map(|e| e.total)
+                    .sum();
+                sum as f64 / (rate_window_secs as f64 / 60.0)
+            })
+            .unwrap_or(0.0);
+        let mut activity: Vec<Activity> = d
+            .map(|d| {
+                d.pending
+                    .values()
+                    .filter(|(_, _, ts)| now_ms - ts < 30 * 60_000)
+                    .map(|(tool, detail, ts)| Activity {
+                        tool: tool.clone(),
+                        detail: detail.clone(),
+                        since_ms: *ts,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        activity.sort_by_key(|a| a.since_ms);
+        activity.truncate(4);
         Agent {
             id: self.id.clone(),
             subagent_type: self.subagent_type.clone(),
             description: self.description.clone(),
-            model: self.model.clone(),
+            model: d.and_then(|d| d.model.clone()).or_else(|| self.model.clone()),
             state: if self.finished {
                 AgentState::Finished
             } else {
                 AgentState::Running
             },
             started_at: self.started_at,
-            tokens: TokenLedger::default(),
-            tokens_per_min: 0.0,
-            children: self.children.iter().map(AgentAccum::to_model).collect(),
+            tokens,
+            tokens_per_min,
+            activity,
+            last_activity: d.and_then(|d| d.last_activity),
+            children: self
+                .children
+                .iter()
+                .map(|c| c.to_model(data, now_ms, rate_window_secs))
+                .collect(),
         }
     }
+}
+
+/// Live data read from one subagent's own sidechain transcript.
+#[derive(Default)]
+struct AgentData {
+    ledger: TokenLedger,
+    events: VecDeque<TokenEvent>,
+    model: Option<String>,
+    pending: HashMap<String, (String, String, i64)>,
+    last_activity: Option<i64>,
 }
 
 /// Per-session persistent accumulator.
@@ -67,6 +117,8 @@ struct SessionAccum {
     /// In-flight tool calls: id -> (tool, detail, started_ms). Removed when
     /// the matching tool_result arrives.
     pending_tools: HashMap<String, (String, String, i64)>,
+    /// Per-agent sidechain data, keyed by the launching tool_use id.
+    agent_data: HashMap<String, AgentData>,
     events: VecDeque<TokenEvent>,
     last_user_turn: Option<i64>,
     last_activity: Option<i64>,
@@ -124,6 +176,15 @@ impl SessionAccum {
                 break;
             }
         }
+        for d in self.agent_data.values_mut() {
+            while let Some(front) = d.events.front() {
+                if front.ts_ms < cutoff {
+                    d.events.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Sum of `total` tokens within the window ending at `now_ms`.
@@ -153,6 +214,8 @@ pub struct Engine {
     last_ended_scan: i64,
     /// Last full process-table scan (epoch ms) — needed for child discovery.
     last_full_scan: i64,
+    /// agent sidechain path -> launching tool_use id (from its meta.json).
+    agent_meta: HashMap<PathBuf, Option<String>>,
 }
 
 impl Engine {
@@ -167,6 +230,7 @@ impl Engine {
             // i64::MIN would overflow the subtraction; "long ago" is enough.
             last_ended_scan: -1,
             last_full_scan: -1,
+            agent_meta: HashMap::new(),
         }
     }
 
@@ -209,10 +273,13 @@ impl Engine {
             self.probe.refresh_pids(&pids);
         }
 
-        // Fold any new transcript bytes for each known session.
+        // Fold any new transcript bytes for each known session, then their
+        // subagents' own sidechain transcripts
+        // (`<project>/<sessionId>/subagents/agent-*.jsonl`).
         for meta in &metas {
             if let Some(path) = transcript_index.get(&meta.session_id) {
                 self.ingest_transcript(&meta.session_id, path.clone());
+                self.ingest_agent_sidechains(&meta.session_id, path);
             }
         }
 
@@ -324,8 +391,12 @@ impl Engine {
                 None => SessionState::Running,
             };
 
-            // Agents (clone tree into model form).
-            let agents: Vec<Agent> = accum.agents.iter().map(AgentAccum::to_model).collect();
+            // Agents (clone tree into model form, enriched from sidechains).
+            let agents: Vec<Agent> = accum
+                .agents
+                .iter()
+                .map(|a| a.to_model(&accum.agent_data, now_ms, self.config.rate_window_secs))
+                .collect();
             let agent_starts_in_window = count_recent_agent_starts(
                 &accum.agents,
                 now_ms,
@@ -659,6 +730,109 @@ impl Engine {
             }
         }
         index
+    }
+}
+
+impl Engine {
+    /// Ingest every subagent sidechain of `sid`: tokens roll up into both the
+    /// agent's own ledger and the parent session (they drain the same tank).
+    fn ingest_agent_sidechains(&mut self, sid: &str, session_transcript: &std::path::Path) {
+        let dir = match session_transcript.parent() {
+            Some(p) => p.join(sid).join("subagents"),
+            None => return,
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            // meta.json (cached) links the file to its launching tool_use.
+            let tool_use_id = self
+                .agent_meta
+                .entry(path.clone())
+                .or_insert_with(|| {
+                    let meta = path.with_extension("meta.json");
+                    std::fs::read_to_string(meta)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .and_then(|v| {
+                            v.get("toolUseId")
+                                .and_then(|x| x.as_str())
+                                .map(str::to_string)
+                        })
+                })
+                .clone();
+            let Some(tool_use_id) = tool_use_id else {
+                continue;
+            };
+
+            let watermark = *self.watermarks.get(&path).unwrap_or(&0);
+            let Some((lines, new_watermark)) = read_new_lines(&path, watermark) else {
+                continue;
+            };
+            self.watermarks.insert(path, new_watermark);
+            if lines.is_empty() {
+                continue;
+            }
+
+            let accum = self.accums.entry(sid.to_string()).or_default();
+            for line in lines {
+                for ev in transcripts::parse_line(&line) {
+                    match ev {
+                        TranscriptEvent::Assistant { ts_ms, model, usage, .. } => {
+                            let data = accum.agent_data.entry(tool_use_id.clone()).or_default();
+                            data.ledger.add(&usage);
+                            if let Some(m) = model {
+                                if !m.starts_with('<') {
+                                    data.model = Some(m);
+                                }
+                            }
+                            if let Some(ts) = ts_ms {
+                                data.last_activity =
+                                    Some(ts.max(data.last_activity.unwrap_or(0)));
+                                let te = TokenEvent {
+                                    ts_ms: ts,
+                                    total: usage.billable(),
+                                    input: usage.input,
+                                    cache_read: usage.cache_read,
+                                };
+                                data.events.push_back(te);
+                                // Roll up into the parent session: subagent
+                                // burn drains the same account.
+                                accum.ledger.add(&usage);
+                                accum.events.push_back(te);
+                                accum.last_activity =
+                                    Some(ts.max(accum.last_activity.unwrap_or(0)));
+                            }
+                        }
+                        TranscriptEvent::ToolStart { id, name, detail, ts_ms } => {
+                            if let Some(ts) = ts_ms {
+                                accum
+                                    .agent_data
+                                    .entry(tool_use_id.clone())
+                                    .or_default()
+                                    .pending
+                                    .insert(id, (name, detail, ts));
+                            }
+                        }
+                        TranscriptEvent::ToolResult { tool_use_id: rid, .. } => {
+                            if let Some(data) = accum.agent_data.get_mut(&tool_use_id) {
+                                data.pending.remove(&rid);
+                            }
+                        }
+                        TranscriptEvent::RateLimited { ts_ms } => {
+                            if let Some(ts) = ts_ms {
+                                self.rate_limits.push_back(ts);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 }
 

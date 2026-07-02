@@ -67,13 +67,33 @@ fn governor_segment(app: &App) -> String {
 fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.snapshot.totals;
     let conn = if app.connected { "●" } else { "○ disconnected" };
+    // Fleet-wide agent census: running/total across every session.
+    let (mut running, mut total) = (0usize, 0usize);
+    fn census(agents: &[ccwatch_core::model::Agent], r: &mut usize, t: &mut usize) {
+        for a in agents {
+            *t += 1;
+            if matches!(a.state, AgentState::Running) {
+                *r += 1;
+            }
+            census(&a.children, r, t);
+        }
+    }
+    for s in &app.snapshot.sessions {
+        census(&s.agents, &mut running, &mut total);
+    }
+    let agents_seg = if total > 0 {
+        format!(" · ⚒ {running}▶/{total} agents")
+    } else {
+        String::new()
+    };
     let text = format!(
-        " ccwatch  {conn}  {} · {} active · {} tok/min · Σ {} · cache {:.0}%{}",
+        " ccwatch  {conn}  {} · {} active · {} tok/min · Σ {} · cache {:.0}%{}{}",
         host_breakdown(app),
         t.active_sessions,
         format::rate(t.tokens_per_min),
         format::tokens(t.total_tokens),
         t.cache_hit_pct,
+        agents_seg,
         governor_segment(app),
     );
     let style = if app.connected {
@@ -399,14 +419,47 @@ fn agent_line(
         .started_at
         .map(|t| format::ago(t, app.now_ms))
         .unwrap_or_else(|| "-".into());
+    let last = a
+        .last_activity
+        .map(|t| format::ago(t, app.now_ms))
+        .unwrap_or_else(|| "-".into());
     // The name area spans the NAME + HOST columns, so agent rows keep the
-    // state/up columns aligned with session rows.
+    // state/up columns aligned with session rows. A running agent's current
+    // tool call rides along in the label.
     let name_area = w.name + w.host;
-    let label = format!("{indent}{branch}{} [{}]", a.description, a.subagent_type);
+    let mut label = format!("{indent}{branch}{} [{}]", a.description, a.subagent_type);
+    if matches!(a.state, AgentState::Running) {
+        if let Some(act) = a.activity.first() {
+            label.push_str(&format!(" · {} {}", act.tool, act.detail));
+        }
+    }
+    let t = &a.tokens;
+    let breakdown = if t.messages > 0 {
+        format!(
+            "{}/{}/{}/{}",
+            format::tokens(t.input),
+            format::tokens(t.output),
+            format::tokens(t.cache_write),
+            format::tokens(t.cache_read),
+        )
+    } else {
+        "-".into()
+    };
+    let model = a
+        .model
+        .as_deref()
+        .map(|m| format!("[{}]", m.trim_start_matches("claude-")))
+        .unwrap_or_default();
     Line::from(vec![
         Span::styled(cell(&label, name_area), Style::default().fg(Color::Cyan)),
         Span::styled(cell(st, w.state), Style::default().fg(color)),
         Span::styled(cell(&up, w.up), Style::default().fg(Color::DarkGray)),
+        Span::styled(cell(&last, w.last), Style::default().fg(Color::DarkGray)),
+        burn_span(a.tokens_per_min, BURN_RED, w),
+        Span::styled(cell(&breakdown, w.breakdown), Style::default().fg(Color::Gray)),
+        Span::raw(cell_r("", w.cpu)),
+        Span::raw(cell_r("", w.rss)),
+        Span::styled(model, Style::default().fg(Color::DarkGray)),
     ])
 }
 

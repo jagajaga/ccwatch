@@ -521,6 +521,8 @@ pub(crate) mod test_support {
             started_at: Some(1000),
             tokens: TokenLedger::default(),
             tokens_per_min: 0.0,
+            activity: vec![],
+            last_activity: None,
             children,
         }
     }

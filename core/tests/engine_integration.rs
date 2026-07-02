@@ -144,6 +144,82 @@ fn pending_tool_with_stale_generation_is_waiting_not_idle() {
 }
 
 #[test]
+fn subagent_sidechain_enriches_agent_and_rolls_up() {
+    let now: i64 = 1_800_000_000_000;
+    let root = std::env::temp_dir().join(format!("ccw-engine-side-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pid = std::process::id() as i32;
+    let sid = "sess-side";
+
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::write(
+        root.join("sessions").join(format!("{pid}.json")),
+        format!(r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/tmp/s","startedAt":{},"name":"parent"}}"#, now - 60_000),
+    )
+    .unwrap();
+
+    let proj = root.join("projects").join("-tmp-s");
+    std::fs::create_dir_all(&proj).unwrap();
+    // Parent transcript: one message launching a background agent.
+    let launch = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now - 50_000),
+        "message": {
+            "usage": {"input_tokens": 100, "output_tokens": 200},
+            "content": [{"type": "tool_use", "id": "toolu_side", "name": "Agent",
+                         "input": {"description": "side worker", "subagent_type": "claude",
+                                   "run_in_background": true}}]
+        }
+    });
+    std::fs::write(proj.join(format!("{sid}.jsonl")), format!("{launch}\n")).unwrap();
+
+    // The agent's own sidechain transcript + meta linking it back.
+    let subdir = proj.join(sid).join("subagents");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(
+        subdir.join("agent-abc123.meta.json"),
+        r#"{"agentType":"claude","description":"side worker","toolUseId":"toolu_side","spawnDepth":1}"#,
+    )
+    .unwrap();
+    let mut side = String::new();
+    let gen = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now - 30_000),
+        "isSidechain": true,
+        "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": 500, "output_tokens": 7_000},
+                     "content": [{"type": "tool_use", "id": "toolu_inner", "name": "Bash",
+                                  "input": {"command": "cargo test"}}]}
+    });
+    side.push_str(&format!("{gen}\n"));
+    std::fs::write(subdir.join("agent-abc123.jsonl"), side).unwrap();
+
+    let mut engine = Engine::new(Paths::new(&root), Config::default());
+    let snap = engine.refresh(now);
+    let s = &snap.sessions[0];
+
+    // The agent row carries its own tokens, rate, model, and live activity.
+    assert_eq!(s.agents.len(), 1);
+    let a = &s.agents[0];
+    assert_eq!(a.tokens.output, 7_000);
+    assert_eq!(a.tokens.input, 500);
+    assert!(a.tokens_per_min > 0.0, "agent burn rate from its sidechain");
+    assert_eq!(a.model.as_deref(), Some("claude-haiku-4-5"));
+    assert_eq!(a.activity.len(), 1, "agent's in-flight Bash is visible");
+    assert_eq!(a.activity[0].detail, "cargo test");
+    assert!(a.last_activity.is_some());
+
+    // And it rolls up: session totals include the subagent's burn.
+    assert_eq!(s.tokens.output, 200 + 7_000, "session includes agent tokens");
+
+    // Idempotent across refreshes (watermarks, no double counting).
+    let snap2 = engine.refresh(now);
+    assert_eq!(snap2.sessions[0].tokens.output, 7_200);
+    assert_eq!(snap2.sessions[0].agents[0].tokens.output, 7_000);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn incremental_ingest_accumulates_across_refreshes() {
     let now: i64 = 1_800_000_000_000;
     let root = std::env::temp_dir().join(format!("ccw-engine-it2-{}", std::process::id()));
