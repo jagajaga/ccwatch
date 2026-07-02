@@ -33,12 +33,39 @@ jobs:
           done
           cp README.md dist/ccwatch/
           tar -C dist -czf "ccwatch-${GITHUB_REF_NAME}-macos-universal.tar.gz" ccwatch
-          shasum -a 256 ccwatch-*.tar.gz > checksums.txt
+      - name: App bundle (menu bar)
+        run: |
+          APP="dist/ccwatch-menubar.app"
+          mkdir -p "$APP/Contents/MacOS"
+          # ccwatchd and ccwatch ride along: the app spawns the daemon and
+          # "Open TUI dashboard" from beside its own executable.
+          cp dist/ccwatch/ccwatch-menubar dist/ccwatch/ccwatchd dist/ccwatch/ccwatch "$APP/Contents/MacOS/"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key><string>ccwatch</string>
+              <key>CFBundleDisplayName</key><string>ccwatch</string>
+              <key>CFBundleIdentifier</key><string>com.jagajaga.ccwatch</string>
+              <key>CFBundleVersion</key><string>${GITHUB_REF_NAME#v}</string>
+              <key>CFBundleShortVersionString</key><string>${GITHUB_REF_NAME#v}</string>
+              <key>CFBundleExecutable</key><string>ccwatch-menubar</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>LSUIElement</key><true/>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep -s - "$APP"
+          ditto -c -k --keepParent "$APP" "ccwatch-menubar-${GITHUB_REF_NAME}-macos.zip"
+          shasum -a 256 ccwatch-*.tar.gz ccwatch-menubar-*.zip > checksums.txt
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            ccwatch-*.tar.gz checksums.txt \
+            ccwatch-*.tar.gz ccwatch-menubar-*.zip checksums.txt \
             --title "ccwatch $GITHUB_REF_NAME" \
             --generate-notes

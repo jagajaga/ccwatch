@@ -12,6 +12,7 @@
 
 mod client;
 mod graph;
+mod login;
 mod prefs;
 mod summary;
 
@@ -56,7 +57,7 @@ fn run(paths: &Paths) -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{client, graph, summary};
+    use super::{client, graph, login, summary};
     use ccwatch_core::ipc::ActionRequest;
     use ccwatch_core::{Config, Paths};
     use std::collections::HashMap;
@@ -81,6 +82,8 @@ mod macos {
         Quit,
         OpenTui,
         ToggleHideIdle,
+        ToggleHideInactive,
+        ToggleLoginItem,
         SetTitleMode(TitleMode),
         Pause { pid: i32, name: String },
         Resume { pid: i32, name: String },
@@ -164,6 +167,8 @@ mod macos {
         open_tui: MenuItem,
         quit: MenuItem,
         hide_idle: CheckMenuItem,
+        hide_inactive: CheckMenuItem,
+        login_item: CheckMenuItem,
         mode_items: Vec<(TitleMode, CheckMenuItem)>,
     }
 
@@ -181,7 +186,17 @@ mod macos {
             // Settings ▸ hide-idle toggle + bar-content radio.
             let settings = Submenu::new("Settings", true);
             let hide_idle = CheckMenuItem::new("Hide idle sessions", true, prefs.hide_idle, None);
+            let hide_inactive = CheckMenuItem::new(
+                "Hide from menu bar when inactive",
+                true,
+                prefs.hide_when_inactive,
+                None,
+            );
+            let login_item =
+                CheckMenuItem::new("Start at login", true, login::enabled(), None);
             let _ = settings.append(&hide_idle);
+            let _ = settings.append(&hide_inactive);
+            let _ = settings.append(&login_item);
             let _ = settings.append(&PredefinedMenuItem::separator());
             let bar_label = MenuItem::new("Show in menu bar:", false, None);
             let _ = settings.append(&bar_label);
@@ -211,13 +226,17 @@ mod macos {
                 open_tui,
                 quit,
                 hide_idle,
+                hide_inactive,
+                login_item,
                 mode_items,
             }
         }
 
-        /// Sync the Settings checkmarks with the prefs.
+        /// Sync the Settings checkmarks with prefs + system state.
         fn sync_prefs(&self, prefs: &Prefs) {
             self.hide_idle.set_checked(prefs.hide_idle);
+            self.hide_inactive.set_checked(prefs.hide_when_inactive);
+            self.login_item.set_checked(login::enabled());
             for (mode, item) in &self.mode_items {
                 item.set_checked(*mode == prefs.title_mode);
             }
@@ -267,6 +286,8 @@ mod macos {
             map.insert(self.quit.id().clone(), Action::Quit);
             map.insert(self.open_tui.id().clone(), Action::OpenTui);
             map.insert(self.hide_idle.id().clone(), Action::ToggleHideIdle);
+            map.insert(self.hide_inactive.id().clone(), Action::ToggleHideInactive);
+            map.insert(self.login_item.id().clone(), Action::ToggleLoginItem);
             for (mode, item) in &self.mode_items {
                 map.insert(item.id().clone(), Action::SetTitleMode(*mode));
             }
@@ -472,6 +493,13 @@ mod macos {
                         model.sessions.iter().map(|e| e.id.as_str()).collect();
                     session_hist.retain(|id, _| live.contains(id.as_str()));
                 }
+                // Optionally vanish from the bar while nothing runs or burns;
+                // reappears on its own when activity resumes.
+                let inactive = snap.totals.tokens_per_min < 1.0
+                    && !snap.sessions.iter().any(|s| {
+                        matches!(s.state, ccwatch_core::model::SessionState::Running)
+                    });
+                let _ = tray.set_visible(!(prefs.hide_when_inactive && inactive));
                 tray.set_title(Some(summary::tray_title(&view, true, prefs.title_mode)));
                 let _ = tray.set_tooltip(Some(summary::tooltip(&snap)));
                 tray_menu.governor.set_text(summary::governor_line(&snap));
@@ -492,6 +520,17 @@ mod macos {
                         prefs.save(&prefs_path);
                         tray_menu.sync_prefs(&prefs);
                         render_needed = true;
+                    }
+                    Some(Action::ToggleHideInactive) => {
+                        prefs.hide_when_inactive = !prefs.hide_when_inactive;
+                        prefs.save(&prefs_path);
+                        tray_menu.sync_prefs(&prefs);
+                        render_needed = true;
+                    }
+                    Some(Action::ToggleLoginItem) => {
+                        let msg = login::set(!login::enabled());
+                        tray_menu.sync_prefs(&prefs);
+                        notify(&msg);
                     }
                     Some(Action::SetTitleMode(mode)) => {
                         prefs.title_mode = mode;

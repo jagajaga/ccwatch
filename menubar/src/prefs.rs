@@ -46,6 +46,9 @@ impl TitleMode {
 pub struct Prefs {
     pub hide_idle: bool,
     pub title_mode: TitleMode,
+    /// Hide the menu-bar item entirely while nothing is running/burning; it
+    /// reappears by itself as soon as there's activity.
+    pub hide_when_inactive: bool,
 }
 
 impl Default for Prefs {
@@ -53,6 +56,7 @@ impl Default for Prefs {
         Prefs {
             hide_idle: false,
             title_mode: TitleMode::Throttle,
+            hide_when_inactive: false,
         }
     }
 }
@@ -91,6 +95,7 @@ mod tests {
         let p = Prefs {
             hide_idle: true,
             title_mode: TitleMode::Tank,
+            hide_when_inactive: true,
         };
         p.save(&path);
         assert_eq!(Prefs::load(&path), p);

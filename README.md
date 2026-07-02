@@ -42,12 +42,33 @@ ccwatch already knows. It was watching.
 - 🛰 **Remote machines, zero install** — one line of JSON; a python probe
   goes over ssh, nothing gets installed
 
-## Run
+## Install
+
+**Menu-bar app** — grab `ccwatch-menubar-*.zip` from the
+[latest release](https://github.com/jagajaga/ccwatch/releases/latest), unzip,
+drop `ccwatch-menubar.app` into `/Applications`, open it. The binaries are
+unsigned, so the first launch needs one of:
 
 ```sh
-cargo build --release              # or grab a release
-./target/release/ccwatch           # terminal UI
-./target/release/ccwatch-menubar   # menu bar
+xattr -dr com.apple.quarantine /Applications/ccwatch-menubar.app
+```
+
+(or right-click → Open → Open). Then **Settings ▸ Start at login** makes it
+permanent.
+
+**Terminal UI** — grab `ccwatch-*-macos-universal.tar.gz` from the same
+release:
+
+```sh
+tar xzf ccwatch-*-macos-universal.tar.gz
+mv ccwatch/ccwatch ccwatch/ccwatchd /usr/local/bin/   # or anywhere on PATH
+ccwatch
+```
+
+**From source** (any of it):
+
+```sh
+cargo build --release && ./target/release/ccwatch
 ```
 
 No setup. No accounts. No telemetry. The daemon starts itself and exits
@@ -60,8 +81,10 @@ itself when the last window closes.
 | `/` jump anywhere | `d` details | `s` sort | `enter` expand |
 | `k` kill | `p` `r` pause/resume | `f` hide idle | `x` hide done |
 
-Menu bar → **Settings** picks what sits next to the graph: throttle, burn
-rate, range, tank %, or nothing at all.
+Menu bar → **Settings**: pick what sits next to the graph (throttle, burn
+rate, range, tank %, or nothing), hide idle sessions, vanish from the bar
+entirely while nothing is running (it returns by itself), and **start at
+login**.
 
 ## Remote machines
 
