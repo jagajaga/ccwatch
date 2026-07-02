@@ -33,11 +33,11 @@
 <line x1="70" y1="108" x2="350" y2="108" stroke="#e5e5ea"/>
 <text x="74" y="127.5" fill="#d70015" font-size="12.5">⚠ runaway loop — webapp: 62k tok/min · no user turn </text>
 <rect x="65" y="140" width="290" height="26" rx="6" fill="#0a60ff"/>
-<text x="74" y="157.5" font-size="13.5" fill="#ffffff">webapp<tspan fill="#d8e5ff" font-size="12">   24k tok/min</tspan></text>
+<text x="74" y="157.5" font-size="13.5" fill="#ffffff">Fix flaky checkout tests<tspan fill="#d8e5ff" font-size="12">   24k tok/min</tspan></text>
 <text x="348" y="157.5" fill="#d8e5ff" font-size="12" text-anchor="end">›</text>
-<text x="74" y="187.5" font-size="13.5" fill="#1d1d1f">api-server<tspan fill="#8e8e93" font-size="12">   16k tok/min</tspan></text>
+<text x="74" y="187.5" font-size="13.5" fill="#1d1d1f">API rate limiter design<tspan fill="#8e8e93" font-size="12">   16k tok/min</tspan></text>
 <text x="348" y="187.5" fill="#8e8e93" font-size="12" text-anchor="end">›</text>
-<text x="74" y="217.5" font-size="13.5" fill="#1d1d1f">remote-worker<tspan fill="#8e8e93" font-size="12">   8k tok/min  ·  demo-host</tspan></text>
+<text x="74" y="217.5" font-size="13.5" fill="#1d1d1f">Overnight refactor bot<tspan fill="#8e8e93" font-size="12">   8k · demo-host</tspan></text>
 <text x="348" y="217.5" fill="#8e8e93" font-size="12" text-anchor="end">›</text>
 <line x1="70" y1="228" x2="350" y2="228" stroke="#e5e5ea"/>
 <text x="74" y="247.5" fill="#1d1d1f" font-size="13.5">Settings                                              ›</text>

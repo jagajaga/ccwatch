@@ -293,9 +293,10 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                     None => (SessionAction::None, "No cancel command configured".to_string()),
                 }
             };
+            let display = sess.title.as_deref().unwrap_or(&sess.name);
             SessionEntry {
                 id: sess.id.clone(),
-                title: format!("{}  —  {} tok/min{host}", sess.name, rate(sess.tokens_per_min)),
+                title: format!("{display}  —  {} tok/min{host}", rate(sess.tokens_per_min)),
                 tokens_line,
                 info,
                 name: sess.name.clone(),
@@ -334,6 +335,7 @@ mod tests {
         Session {
             id: format!("id-{name}"),
             name: name.into(),
+            title: None,
             cwd: "/x".into(),
             pid: Some(4242),
             kind: "interactive".into(),

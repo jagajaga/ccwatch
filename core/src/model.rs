@@ -284,7 +284,12 @@ pub struct ProcInfo {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
+    /// Claude's derived slug (folder name + suffix), e.g. "webapp-df".
     pub name: String,
+    /// Human-readable title: the user's custom title if set, else the latest
+    /// AI-generated one — same names Claude's own UI shows.
+    #[serde(default)]
+    pub title: Option<String>,
     pub cwd: String,
     pub pid: Option<i32>,
     pub kind: String,

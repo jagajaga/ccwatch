@@ -332,7 +332,12 @@ impl App {
         let mut items = Vec::new();
         for s in &self.snapshot.sessions {
             items.push(JumpItem {
-                label: format!("session {} [{}]", s.name, s.host.label()),
+                label: format!(
+                    "session {} {} [{}]",
+                    s.title.as_deref().unwrap_or(""),
+                    s.name,
+                    s.host.label()
+                ),
                 kind: "session",
                 session_id: s.id.clone(),
                 agent_path: Vec::new(),
@@ -524,6 +529,7 @@ pub(crate) mod test_support {
         Session {
             id: id.into(),
             name: name.into(),
+            title: None,
             cwd: "/tmp/proj".into(),
             pid: Some(4242),
             kind: "interactive".into(),

@@ -354,9 +354,11 @@ fn session_line(s: &Session, app: &App, w: &Widths) -> Line<'static> {
         .last_activity
         .map(|t| format::ago(t, app.now_ms))
         .unwrap_or_else(|| "-".into());
+    // Prefer the human title (same names Claude's UI shows); slug in details.
+    let display = s.title.as_deref().unwrap_or(&s.name);
     Line::from(vec![
         Span::styled(
-            cell(&format!("{expand}{}", s.name), w.name),
+            cell(&format!("{expand}{display}"), w.name),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         host_cell(&s.host, w),
@@ -690,7 +692,8 @@ fn draw_details_popup(f: &mut Frame, area: Rect, app: &App) {
         Some(RowRef::Session(si)) => {
             let s = &app.snapshot.sessions[si];
             let t = &s.tokens;
-            kv("session", s.name.clone());
+            kv("session", s.title.clone().unwrap_or_else(|| s.name.clone()));
+            kv("slug", s.name.clone());
             kv("id", s.id.clone());
             kv("host", s.host.label());
             kv("pid", s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()));
@@ -1004,6 +1007,7 @@ mod tests {
                 e
             }],
         );
+        hot.title = Some("Fix flaky checkout tests".into());
         hot.tasks = vec![
             Task { subject: "bump dependencies".into(), status: "in_progress".into(), blocked: false, active_form: None },
             Task { subject: "add integration tests".into(), status: "pending".into(), blocked: true, active_form: None },
@@ -1011,9 +1015,11 @@ mod tests {
         ];
 
         let mut quiet = session("s2", "api-server", vec![]);
+        quiet.title = Some("API rate limiter design".into());
         quiet.tokens_per_min = 1_000.0;
 
         let mut remote = session("s3", "remote-worker", vec![]);
+        remote.title = Some("Overnight refactor bot".into());
         remote.host = Host::Remote { name: "demo-host".into(), ssh_target: "user@demo-host".into() };
         remote.remote_name = Some("demo-host".into());
         remote.tokens_per_min = 8_000.0;
@@ -1069,6 +1075,7 @@ mod tests {
         let mut long = session("s2", "a-very-long-session-name-here", vec![]);
         long.state = ccwatch_core::model::SessionState::Idle;
         let mut remote = session("s3", "remote-worker", vec![]);
+        remote.title = Some("Overnight refactor bot".into());
         remote.host = ccwatch_core::model::Host::Remote {
             name: "very-long-hostname-xyz".into(),
             ssh_target: "u@h".into(),

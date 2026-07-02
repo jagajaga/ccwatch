@@ -50,6 +50,8 @@ pub enum TranscriptEvent {
     },
     /// An API 429 — a rate-limit hit, used to calibrate the plan-window budget.
     RateLimited { ts_ms: Option<i64> },
+    /// A human-readable session title ("ai-title" / "custom-title" lines).
+    Title { text: String, custom: bool },
     /// Any other tool call starting — in-flight until its tool_result arrives.
     ToolStart {
         id: String,
@@ -113,6 +115,22 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
     }
 
     match ty {
+        "ai-title" => {
+            if let Some(t) = v.get("aiTitle").and_then(Value::as_str) {
+                out.push(TranscriptEvent::Title {
+                    text: t.to_string(),
+                    custom: false,
+                });
+            }
+        }
+        "custom-title" => {
+            if let Some(t) = v.get("customTitle").and_then(Value::as_str) {
+                out.push(TranscriptEvent::Title {
+                    text: t.to_string(),
+                    custom: true,
+                });
+            }
+        }
         "assistant" => {
             let msg = v.get("message");
             let model = msg
@@ -330,6 +348,18 @@ mod tests {
     fn malformed_line_yields_nothing() {
         assert!(parse_line("{not json").is_empty());
         assert!(parse_line("").is_empty());
+    }
+
+    #[test]
+    fn parses_session_titles() {
+        let ai = r#"{"type":"ai-title","sessionId":"x","aiTitle":"Fix video player glitches"}"#;
+        assert!(parse_line(ai).iter().any(|e| matches!(
+            e, TranscriptEvent::Title { text, custom: false } if text == "Fix video player glitches"
+        )));
+        let custom = r#"{"type":"custom-title","sessionId":"x","customTitle":"My thing"}"#;
+        assert!(parse_line(custom).iter().any(|e| matches!(
+            e, TranscriptEvent::Title { text, custom: true } if text == "My thing"
+        )));
     }
 
     #[test]

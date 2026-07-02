@@ -128,6 +128,7 @@ fn daemon_merges_remote_and_cancels() {
     remote_snap.sessions.push(Session {
         id: "rw1".into(),
         name: "remote-worker".into(),
+        title: None,
         cwd: "/remote/proj".into(),
         pid: Some(999),
         kind: "interactive".into(),

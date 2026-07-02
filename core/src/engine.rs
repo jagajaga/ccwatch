@@ -71,6 +71,8 @@ struct SessionAccum {
     last_user_turn: Option<i64>,
     last_activity: Option<i64>,
     model: Option<String>,
+    ai_title: Option<String>,
+    custom_title: Option<String>,
     agents: Vec<AgentAccum>,
     /// Aggregated ScheduleWakeup ("loop") watcher state.
     loop_count: u64,
@@ -374,9 +376,15 @@ impl Engine {
                 meta.name.clone()
             };
 
+            let title = {
+                let a = self.accums.get(&session_id);
+                a.and_then(|a| a.custom_title.clone())
+                    .or_else(|| a.and_then(|a| a.ai_title.clone()))
+            };
             out_sessions.push(Session {
                 id: session_id.clone(),
                 name,
+                title,
                 cwd: meta.cwd.clone(),
                 pid: meta.pid,
                 kind: if meta.kind.is_empty() {
@@ -592,6 +600,13 @@ impl Engine {
                     } => {
                         accum.finish_agent(&tool_use_id, notification);
                         accum.pending_tools.remove(&tool_use_id);
+                    }
+                    TranscriptEvent::Title { text, custom } => {
+                        if custom {
+                            accum.custom_title = Some(text);
+                        } else {
+                            accum.ai_title = Some(text);
+                        }
                     }
                     TranscriptEvent::ToolStart { id, name, detail, ts_ms } => {
                         if let Some(ts) = ts_ms {

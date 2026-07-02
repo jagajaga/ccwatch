@@ -19,7 +19,7 @@
 <text x="14.0" y="156.0" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│</text>
 <text x="22.4" y="156.0" xml:space="preserve" textLength="915.6" lengthAdjust="spacingAndGlyphs" fill="#6c7086">  name/desc             host        state   up     last   tok/mi… in/out/cw/cr                cpu   rss model</text>
 <text x="938.0" y="156.0" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">       │</text>
-<text x="14.0" y="174.0" xml:space="preserve" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│▾ webapp                </text>
+<text x="14.0" y="174.0" xml:space="preserve" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│▾ Fix flaky checkout t… </text>
 <text x="224.0" y="174.0" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#6c7086">local       </text>
 <text x="324.8" y="174.0" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a6e3a1">running </text>
 <text x="392.0" y="174.0" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">10s    </text>
@@ -43,7 +43,7 @@
 <text x="324.8" y="210.0" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a6e3a1">running </text>
 <text x="392.0" y="210.0" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#6c7086">9s     </text>
 <text x="450.8" y="210.0" xml:space="preserve" textLength="554.4" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">                                                                 │</text>
-<text x="14.0" y="228.0" xml:space="preserve" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│  remote-worker         </text>
+<text x="14.0" y="228.0" xml:space="preserve" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│  Overnight refactor b… </text>
 <text x="224.0" y="228.0" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#89b4fa">demo-host   </text>
 <text x="324.8" y="228.0" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a6e3a1">running </text>
 <text x="392.0" y="228.0" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">10s    </text>
@@ -51,7 +51,7 @@
 <text x="803.6" y="228.0" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4"> 34%  420M </text>
 <text x="896.0" y="228.0" xml:space="preserve" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#6c7086">[opus-4-8]</text>
 <text x="980.0" y="228.0" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">  │</text>
-<text x="14.0" y="246.0" xml:space="preserve" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│  api-server            </text>
+<text x="14.0" y="246.0" xml:space="preserve" textLength="210.0" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">│  API rate limiter des… </text>
 <text x="224.0" y="246.0" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#6c7086">local       </text>
 <text x="324.8" y="246.0" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a6e3a1">running </text>
 <text x="392.0" y="246.0" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#cdd6f4">10s    </text>

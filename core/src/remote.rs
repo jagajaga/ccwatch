@@ -301,6 +301,7 @@ mod tests {
         s.sessions.push(Session {
             id: format!("id-{name}"),
             name: name.into(),
+            title: None,
             cwd: "/x".into(),
             pid: Some(1),
             kind: "interactive".into(),

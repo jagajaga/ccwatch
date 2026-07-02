@@ -140,6 +140,7 @@ def scan_transcript(path):
     window_billable = 0
     last_act = None
     model = None
+    titles = {"ai": None, "custom": None}
     agents = {}  # tool_use id -> agent dict, insertion-ordered
     bg_ids = set()  # background launches: plain tool_results don't finish them
     pending = {}  # tool_use id -> (tool, detail, ts) awaiting a result
@@ -155,6 +156,10 @@ def scan_transcript(path):
             except Exception:
                 continue
             ts = parse_ts(d.get("timestamp") or "")
+            if d.get("type") == "ai-title" and d.get("aiTitle"):
+                titles["ai"] = d["aiTitle"]
+            elif d.get("type") == "custom-title" and d.get("customTitle"):
+                titles["custom"] = d["customTitle"]
             if d.get("apiErrorStatus") == 429 and ts and ts >= NOW_MS - HORIZON_MS:
                 RATE_LIMITS.append(ts)
             m = d.get("message") or {}
@@ -246,7 +251,8 @@ def scan_transcript(path):
         for t, det, ts in sorted(pending.values(), key=lambda x: x[2])
         if NOW_MS - ts < 30 * 60 * 1000
     ][:6]
-    return led, window_billable, last_act, model, list(agents.values()), activity
+    title = titles["custom"] or titles["ai"]
+    return led, window_billable, last_act, model, list(agents.values()), activity, title
 
 
 def read_tasks(sid):
@@ -284,10 +290,10 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
     if not sid or not pid or not alive(pid):
         continue
 
-    led, window_billable, last_act, model, agents, activity = (
+    led, window_billable, last_act, model, agents, activity, title = (
         scan_transcript(transcripts[sid])
         if sid in transcripts
-        else (zero_ledger(), 0, None, None, [], [])
+        else (zero_ledger(), 0, None, None, [], [], None)
     )
     tpm = window_billable / (WINDOW_MS / 60000.0)
     last = last_act or meta.get("startedAt")
@@ -297,6 +303,7 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
     sessions.append({
         "id": sid,
         "name": meta.get("name") or sid,
+        "title": title,
         "cwd": meta.get("cwd", ""),
         "pid": pid,
         "kind": meta.get("kind") or "interactive",
