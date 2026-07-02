@@ -29,7 +29,7 @@ fn host_label(h: &Host) -> String {
 /// Format a cruise delta: `▲2.1×` above cruise, `▼0.6×` below, `⛔` when the
 /// tank is empty and still burning.
 pub fn delta_str(delta: f64) -> String {
-    if delta.is_infinite() {
+    if delta.is_infinite() || delta >= ccwatch_core::governor::DELTA_EMPTY {
         "⛔".to_string()
     } else if delta >= 1.0 {
         format!("▲{delta:.1}×")
@@ -476,6 +476,7 @@ mod tests {
         assert_eq!(delta_str(2.14), "▲2.1×");
         assert_eq!(delta_str(0.6), "▼0.6×");
         assert_eq!(delta_str(f64::INFINITY), "⛔");
+        assert_eq!(delta_str(99.0), "⛔");
     }
 
     #[test]

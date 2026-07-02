@@ -14,6 +14,9 @@ use crate::config::Config;
 use crate::model::{Alert, AlertKind, BudgetSource, GovernorStatus, Severity, Tank};
 
 pub const BUCKET_MS: i64 = 5 * 60 * 1000;
+/// Delta ceiling: JSON cannot represent infinity (serde encodes it as null),
+/// so "tank empty but still burning" is capped here. UIs render >= this as ⛔.
+pub const DELTA_EMPTY: f64 = 99.0;
 /// Rate window for the "current speed" readout (matches the engine's default).
 const RATE_WINDOW_MS: i64 = 5 * 60 * 1000;
 
@@ -89,7 +92,7 @@ fn make_tank(
     let delta = match cruise_per_min {
         Some(c) if c > 0.0 => Some(rate_per_min / c),
         // Budget exhausted but still burning → infinite throttle.
-        Some(_) if rate_per_min > 0.0 => Some(f64::INFINITY),
+        Some(_) if rate_per_min > 0.0 => Some(DELTA_EMPTY),
         _ => None,
     };
     let range_min = match remaining {
@@ -160,7 +163,7 @@ pub fn compute(
             let delta = if cruise_per_min > 0.0 {
                 Some(rate_per_min / cruise_per_min)
             } else if rate_per_min > 0.0 {
-                Some(f64::INFINITY)
+                Some(DELTA_EMPTY)
             } else {
                 None
             };
@@ -343,7 +346,7 @@ mod tests {
         c.governor_window_budget = Some(100); // tiny budget, long overshot
         let b = buckets(&[(60, 500_000), (2, 50_000)]);
         let g = compute(&b, NOW, &c, None);
-        assert!(g.window.delta.unwrap().is_infinite());
+        assert!(g.window.delta.unwrap() >= DELTA_EMPTY);
         assert_eq!(g.window.range_min, Some(0.0));
     }
 

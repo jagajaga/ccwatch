@@ -47,7 +47,7 @@ fn governor_segment(app: &App) -> String {
     let Some(delta) = g.primary_delta() else {
         return String::new();
     };
-    let arrow = if delta.is_infinite() {
+    let arrow = if delta.is_infinite() || delta >= ccwatch_core::governor::DELTA_EMPTY {
         return " · ⛔ tank empty".to_string();
     } else if delta >= 1.0 {
         format!("▲{delta:.1}×")
