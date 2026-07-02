@@ -1,129 +1,108 @@
 # ccwatch
 
-See everything Claude Code is doing — every session, agent, and process, on
-this machine and your servers — and how fast it's burning through your token
-budget.
+[![ci](https://github.com/jagajaga/ccwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/jagajaga/ccwatch/actions/workflows/ci.yml)
+
+Four Claude Code sessions on your laptop, another one on a server, half of them
+running agents that spawn agents. Somewhere in there, tokens are burning — and
+the first you hear of it is *"limit reached, resets at 03:00"*, right in the
+middle of the thing you actually cared about.
+
+ccwatch is mission control: a menu-bar fuel gauge and a terminal dashboard for
+every session, agent, and process Claude runs — on every machine you own.
 
 ![ccwatch terminal UI](docs/screenshot-tui.svg)
 
 ![ccwatch menu bar](docs/screenshot-menubar.svg)
 
-## What it shows
+## The sixty-second tour
 
-- **Sessions** across all your machines: state, uptime, last activity, burn
-  rate, token breakdown, cpu/ram
-- **What each session is doing right now**: in-flight tool calls (editing
-  which file, running which command) and the child processes it spawned
-- **Agents** each session launched, including background ones, with live
-  running/done state
-- **The Governor** — a fuel gauge for your plan limits (see below)
-- **Alerts** when something leaks: runaway loops, cache misses, agent storms,
-  a session burning while idle, an unreachable server
+**The menu bar** is the glance. A live burn graph (teal: cruising, red: you're
+flooring it) next to your throttle — `▼0.6×` means you'll coast past the limit
+reset, `▲2.1×` means you'll hit the wall well before it. Click it: every
+session with its own burn sparkline, what it's doing *right now* ("Edit
+engine.rs", "cargo build 87%"), and Kill / Pause for the one that's gone feral.
 
-And it acts: kill, pause, or resume a session from the TUI or the menu bar,
-with confirmation.
+**The terminal UI** is the cockpit. Every session across every machine —
+state, last activity, burn rate, token breakdown, cpu/ram — with leak alerts
+pinned on top: runaway loops, cache misses, agent storms, a session burning
+while it claims to be idle. Expand a session to see its agents (background
+ones show truthfully as *running*, not "done"). The bottom panes show its
+todos, its in-flight tool calls and child processes, and its watchers.
 
-## Install
+| | | | |
+|---|---|---|---|
+| `/` jump to anything | `d` details | `s` sort | `enter` expand |
+| `k` kill | `p`/`r` pause/resume | `f` hide idle | `x` hide finished |
 
-Download the latest [release](https://github.com/jagajaga/ccwatch/releases)
-(universal macOS binaries) or build from source:
-
-```sh
-cargo build --release
-```
-
-Then:
+## Quick start
 
 ```sh
+cargo build --release     # or grab a release binary
 ./target/release/ccwatch           # terminal UI
 ./target/release/ccwatch-menubar   # menu-bar app
 ```
 
-Both start the background daemon automatically, and it exits on its own
-~15 s after the last client closes (so quitting the TUI/menu bar leaves
-nothing behind; `ccwatchd --persist` keeps it resident).
-
-## Terminal UI
-
-| Key | Action |
-|---|---|
-| `↑` `↓` / `enter` | move / expand session's agents |
-| `/` | fuzzy-jump to anything by name |
-| `d` | details popup |
-| `s` | cycle sort (tok/min, last active, name, cpu, rss) |
-| `f` / `x` | hide idle sessions / hide finished agents |
-| `k` / `p` / `r` | kill / pause / resume (with confirmation) |
-| `q` | quit |
-
-## Menu bar
-
-A live burn graph sits in the menu bar (teal = calm, red = at your limit),
-next to a readout you choose in **Settings**: throttle, burn rate, range,
-tank %, or graph only. Click for the dropdown: governor line, alerts, and one
-submenu per session with its burn sparkline, current activity, and
-kill/pause/resume. Preferences persist across restarts.
+That's it. Both start the collector daemon themselves, and it cleans itself up
+~15 s after the last one closes. No setup, no accounts, no telemetry —
+everything stays on your machines.
 
 ## The Governor
 
-Like a car's range estimate: floor it and you hit your plan limit early; ease
-off and you coast to the reset.
+The fuel gauge. Like a car's range estimate: keep flooring it and you run dry
+early; ease off and you make it to the reset.
 
-- **Tank** — how much of your 5-hour plan window is left. The window anchors
-  the way Anthropic's does (first message starts it), and the budget is
-  **learned automatically from the 429 rate-limits in your own history** — no
-  configuration needed (a `~` marks it as an estimate; set `window_budget` to
-  override).
-- **Throttle** (`▲2.1×` / `▼0.6×`) — how your current burn compares to the
-  pace that would land exactly at the reset. Above 1× means you'll hit the
-  wall first — and a "limit ahead" alert tells you when.
-- **Range** — minutes until empty at the current speed.
+- **Tank** — how much of your 5-hour plan window remains. Here's the trick:
+  ccwatch **learns your real limit from the 429s in your own history** — every
+  time you've ever hit the wall, that's a measurement. Zero configuration; a
+  `~` marks the estimate.
+- **Throttle** — your burn vs. the pace that lands exactly at the reset.
+- **Range** — minutes until empty at current speed, and a *"limit ahead"*
+  alert with the collision time when range < reset.
 
-Burn counts what you actually pay for (input + output + cache writes, across
-every machine); cheap cache reads are tracked separately.
+It counts what you actually pay for (input + output + cache writes), summed
+across every machine — because your server's agents drain the same account
+your laptop does.
 
-## Remote machines
+## Your servers too
 
 ```json
 // ~/.claude/ccwatch/remotes.json
 [{ "name": "my-server", "kind": "ssh", "target": "user@host" }]
 ```
 
-Nothing to install remotely: the daemon pipes a self-contained Python probe
-over ssh, which reads the remote `~/.claude` in place and reports back.
-Needs key-based ssh and python3, that's all. Remote sessions appear next to
-local ones — killable too (TERMs the pid over ssh). If a server stops
-responding you get an alert instead of silence.
+Nothing to install on the remote — the daemon pipes a small Python probe over
+ssh, which reads the remote `~/.claude` in place and reports back sessions,
+burn, agents, processes. Needs ssh keys and python3, nothing else. Remote
+sessions sit next to local ones and are killable (a TERM over ssh). A server
+that stops answering becomes an alert, not a silent gap.
 
-## Configuration
+## Tuning
 
-Optional, in `~/.claude/ccwatch/config.toml`:
+`~/.claude/ccwatch/config.toml`, all optional:
 
 ```toml
-hourly_budget = 3_000_000     # self-imposed cruise budget, tokens/hour
-#window_budget = 200_000_000  # plan-window budget; unset → learned from 429s
-terminal = "iTerm"            # for "Open TUI dashboard"; unset → auto-detect
-burn_tokens_per_min = 40000   # when the graph turns red
+hourly_budget = 3_000_000     # personal cruise budget, tokens/hour
+#window_budget = 200_000_000  # plan-window size; unset → learned from 429s
+terminal = "iTerm"            # for "Open TUI dashboard"; auto-detected
+burn_tokens_per_min = 40000   # where the graph turns red
 ```
 
-## How it works
+## Under the hood
 
 ```
-~/.claude (sessions, transcripts, tasks)     ssh → remote ~/.claude
-                    │                                │
-                    ▼                                ▼
-                ccwatchd ──────────────── merges everything, computes
-                    │                     rates, alerts, the Governor
-        unix socket │ (JSON snapshots)
+~/.claude (sessions, transcripts, tasks)      ssh → remote ~/.claude
+                    │                                 │
+                    ▼                                 ▼
+                ccwatchd ····· one daemon: tails transcripts incrementally,
+                    │          watches processes, computes rates + alerts
+        unix socket │          + the Governor
           ┌─────────┴─────────┐
           ▼                   ▼
        ccwatch          ccwatch-menubar
 ```
 
-One daemon does all the work: it tails Claude Code's own transcript files
-(incrementally — only new bytes), watches the process table, and pushes a
-full snapshot to any connected client. The TUI and menu bar are thin views
-over the same data. Everything is local; nothing is sent anywhere except
-your own ssh connections.
+Claude Code already writes everything worth knowing into `~/.claude` — ccwatch
+just reads it well: only new bytes of each transcript, only the pids it cares
+about, redraws only on change. Idle, the whole stack costs ~0% CPU.
 
-Full design notes live in
-[docs/superpowers/specs](docs/superpowers/specs/2026-07-01-claude-code-observability-tui-design.md).
+Design notes: [docs/superpowers/specs](docs/superpowers/specs/2026-07-01-claude-code-observability-tui-design.md)
