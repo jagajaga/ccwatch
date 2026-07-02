@@ -32,9 +32,16 @@ pub enum TranscriptEvent {
         model: Option<String>,
         ts_ms: Option<i64>,
         is_sidechain: bool,
+        /// Launched with `run_in_background`: the immediate tool_result only
+        /// acknowledges the start — completion arrives as a task-notification.
+        background: bool,
     },
-    /// A tool result that may complete a pending agent.
-    ToolResult { tool_use_id: String },
+    /// A tool result that may complete a pending agent. `notification` marks a
+    /// task-notification (authoritative completion, even for background runs).
+    ToolResult {
+        tool_use_id: String,
+        notification: bool,
+    },
     /// A `ScheduleWakeup` call → a recurring/loop watcher.
     ScheduleWakeup {
         ts_ms: Option<i64>,
@@ -67,6 +74,25 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
         out.push(TranscriptEvent::RateLimited { ts_ms });
     }
 
+    // Background-task completions arrive as task-notification blocks carrying
+    // the launching tool_use id — the authoritative "finished" for background
+    // agents whose immediate tool_result only acknowledged the start.
+    if line.contains("<task-notification>") {
+        let mut rest = line;
+        while let Some(i) = rest.find("<tool-use-id>") {
+            rest = &rest[i + "<tool-use-id>".len()..];
+            if let Some(j) = rest.find("</tool-use-id>") {
+                out.push(TranscriptEvent::ToolResult {
+                    tool_use_id: rest[..j].to_string(),
+                    notification: true,
+                });
+                rest = &rest[j..];
+            } else {
+                break;
+            }
+        }
+    }
+
     match ty {
         "assistant" => {
             let msg = v.get("message");
@@ -92,6 +118,10 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
                         if AGENT_TOOLS.contains(&name) {
                             let input = block.get("input");
                             out.push(TranscriptEvent::AgentStart {
+                                background: input
+                                    .and_then(|i| i.get("run_in_background"))
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
                                 id: block
                                     .get("id")
                                     .and_then(Value::as_str)
@@ -149,6 +179,7 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
                                 {
                                     out.push(TranscriptEvent::ToolResult {
                                         tool_use_id: id.to_string(),
+                                        notification: false,
                                     });
                                 }
                             }
@@ -164,6 +195,7 @@ pub fn parse_line(line: &str) -> Vec<TranscriptEvent> {
                 saw_tool_result = true;
                 out.push(TranscriptEvent::ToolResult {
                     tool_use_id: id.to_string(),
+                    notification: false,
                 });
             }
             if saw_text && !saw_tool_result {
@@ -258,7 +290,7 @@ mod tests {
         let evs = parse_line(tr);
         assert!(evs
             .iter()
-            .any(|e| matches!(e, TranscriptEvent::ToolResult { tool_use_id } if tool_use_id == "toolu_abc")));
+            .any(|e| matches!(e, TranscriptEvent::ToolResult { tool_use_id, notification: false } if tool_use_id == "toolu_abc")));
         assert!(!evs
             .iter()
             .any(|e| matches!(e, TranscriptEvent::UserTurn { .. })));
@@ -268,6 +300,30 @@ mod tests {
     fn malformed_line_yields_nothing() {
         assert!(parse_line("{not json").is_empty());
         assert!(parse_line("").is_empty());
+    }
+
+    #[test]
+    fn background_agent_lifecycle() {
+        // Launch with run_in_background.
+        let launch = r#"{"type":"assistant","timestamp":"2026-05-25T12:00:00.000Z","message":{"usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"description":"bg work","subagent_type":"claude","run_in_background":true}}]}}"#;
+        assert!(parse_line(launch).iter().any(|e| matches!(
+            e,
+            TranscriptEvent::AgentStart { id, background: true, .. } if id == "toolu_bg"
+        )));
+
+        // The immediate tool_result is only an acknowledgement.
+        let ack = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"task started"}]}}"#;
+        assert!(parse_line(ack).iter().any(|e| matches!(
+            e,
+            TranscriptEvent::ToolResult { tool_use_id, notification: false } if tool_use_id == "toolu_bg"
+        )));
+
+        // The task-notification is the real completion.
+        let done = r#"{"type":"user","timestamp":"2026-05-25T13:00:00.000Z","message":{"content":"<task-notification><task-id>b123</task-id><tool-use-id>toolu_bg</tool-use-id><status>completed</status></task-notification>"}}"#;
+        assert!(parse_line(done).iter().any(|e| matches!(
+            e,
+            TranscriptEvent::ToolResult { tool_use_id, notification: true } if tool_use_id == "toolu_bg"
+        )));
     }
 
     #[test]

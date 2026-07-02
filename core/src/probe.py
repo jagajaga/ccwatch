@@ -82,6 +82,7 @@ def scan_transcript(path):
     last_act = None
     model = None
     agents = {}  # tool_use id -> agent dict, insertion-ordered
+    bg_ids = set()  # background launches: plain tool_results don't finish them
     try:
         size = os.path.getsize(path)
         fh = open(path, "rb")
@@ -106,6 +107,8 @@ def scan_transcript(path):
                         continue
                     if block.get("type") == "tool_use" and block.get("name") in AGENT_TOOLS:
                         inp = block.get("input") or {}
+                        if inp.get("run_in_background") is True:
+                            bg_ids.add(block.get("id") or "")
                         agents[block.get("id") or ""] = {
                             "id": block.get("id") or "",
                             "subagent_type": inp.get("subagent_type") or block.get("name"),
@@ -119,11 +122,21 @@ def scan_transcript(path):
                         }
                     elif block.get("type") == "tool_result":
                         tid = block.get("tool_use_id")
-                        if tid in agents:
+                        # Background launches ack immediately; that's not done.
+                        if tid in agents and tid not in bg_ids:
                             agents[tid]["state"] = "finished"
             tid = d.get("sourceToolUseID")
-            if tid in agents:
+            if tid in agents and tid not in bg_ids:
                 agents[tid]["state"] = "finished"
+            # Task-notifications are the authoritative background completion.
+            if b"<task-notification>" in raw:
+                text = raw.decode("utf-8", "replace")
+                rest = text
+                while "<tool-use-id>" in rest:
+                    rest = rest.split("<tool-use-id>", 1)[1]
+                    tid, _, rest = rest.partition("</tool-use-id>")
+                    if tid in agents:
+                        agents[tid]["state"] = "finished"
 
             if d.get("type") != "assistant":
                 continue

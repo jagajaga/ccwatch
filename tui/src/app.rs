@@ -100,7 +100,11 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
-                !self.hide_idle || !matches!(s.state, ccwatch_core::model::SessionState::Idle)
+                // "Hide idle" must never hide a session that's still burning —
+                // long tool calls emit no messages and look idle while working.
+                !self.hide_idle
+                    || !matches!(s.state, ccwatch_core::model::SessionState::Idle)
+                    || s.tokens_per_min >= 1.0
             })
             .collect()
     }
@@ -646,14 +650,19 @@ mod tests {
     }
 
     #[test]
-    fn hide_idle_filters_sessions() {
-        let mut idle = session("s2", "sleepy", vec![]);
-        idle.state = SessionState::Idle;
-        let snap = snapshot(vec![session("s1", "busy", vec![]), idle]);
+    fn hide_idle_filters_sessions_but_keeps_burning_ones() {
+        let mut quiet = session("s2", "sleepy", vec![]);
+        quiet.state = SessionState::Idle;
+        quiet.tokens_per_min = 0.0;
+        // Idle by message-timestamps but still burning (long tool call).
+        let mut grinding = session("s3", "grinding", vec![]);
+        grinding.state = SessionState::Idle;
+        grinding.tokens_per_min = 5_000.0;
+        let snap = snapshot(vec![session("s1", "busy", vec![]), quiet, grinding]);
         let mut app = app_with(snap);
-        assert_eq!(app.sessions().len(), 2);
+        assert_eq!(app.sessions().len(), 3);
         app.hide_idle = true;
-        assert_eq!(app.sessions().len(), 1);
-        assert_eq!(app.sessions()[0].1.name, "busy");
+        let names: Vec<&str> = app.sessions().iter().map(|(_, s)| s.name.as_str()).collect();
+        assert_eq!(names, vec!["busy", "grinding"], "burning session must survive the filter");
     }
 }

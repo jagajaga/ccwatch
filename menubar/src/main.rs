@@ -441,8 +441,11 @@ mod macos {
                 // Prefs filter: idle sessions can be hidden from the dropdown.
                 let mut view = snap.clone();
                 if prefs.hide_idle {
+                    // Keep anything still burning — "idle" state lags behind
+                    // long tool calls that emit no messages while working.
                     view.sessions.retain(|s| {
                         !matches!(s.state, ccwatch_core::model::SessionState::Idle)
+                            || s.tokens_per_min >= 1.0
                     });
                 }
                 let model = summary::menu_model(&view);

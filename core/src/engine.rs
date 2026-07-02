@@ -34,6 +34,9 @@ struct AgentAccum {
     model: Option<String>,
     started_at: Option<i64>,
     finished: bool,
+    /// Background launch: only a task-notification finishes it — the immediate
+    /// tool_result is just the "started" acknowledgement.
+    background: bool,
     children: Vec<AgentAccum>,
 }
 
@@ -75,20 +78,24 @@ struct SessionAccum {
 
 impl SessionAccum {
     /// Mark an agent (anywhere in the tree) finished by tool_use id.
-    fn finish_agent(&mut self, id: &str) {
-        fn walk(agents: &mut [AgentAccum], id: &str) -> bool {
+    /// `authoritative` (task-notification) finishes background agents too;
+    /// a plain tool_result only finishes foreground ones.
+    fn finish_agent(&mut self, id: &str, authoritative: bool) {
+        fn walk(agents: &mut [AgentAccum], id: &str, authoritative: bool) -> bool {
             for a in agents.iter_mut() {
                 if a.id == id {
-                    a.finished = true;
+                    if authoritative || !a.background {
+                        a.finished = true;
+                    }
                     return true;
                 }
-                if walk(&mut a.children, id) {
+                if walk(&mut a.children, id, authoritative) {
                     return true;
                 }
             }
             false
         }
-        walk(&mut self.agents, id);
+        walk(&mut self.agents, id, authoritative);
     }
 
     /// Attach a newly-started agent. Non-sidechain agents are top-level;
@@ -495,8 +502,11 @@ impl Engine {
                         ..
                     } => {
                         accum.ledger.add(&usage);
+                        // Skip internal markers like "<synthetic>".
                         if let Some(m) = model {
-                            accum.model = Some(m);
+                            if !m.starts_with('<') {
+                                accum.model = Some(m);
+                            }
                         }
                         if let Some(ts) = ts_ms {
                             accum.last_activity = Some(ts.max(accum.last_activity.unwrap_or(0)));
@@ -525,6 +535,7 @@ impl Engine {
                         model,
                         ts_ms,
                         is_sidechain,
+                        background,
                     } => {
                         accum.add_agent(
                             AgentAccum {
@@ -534,13 +545,17 @@ impl Engine {
                                 model,
                                 started_at: ts_ms,
                                 finished: false,
+                                background,
                                 children: Vec::new(),
                             },
                             is_sidechain,
                         );
                     }
-                    TranscriptEvent::ToolResult { tool_use_id } => {
-                        accum.finish_agent(&tool_use_id);
+                    TranscriptEvent::ToolResult {
+                        tool_use_id,
+                        notification,
+                    } => {
+                        accum.finish_agent(&tool_use_id, notification);
                     }
                     TranscriptEvent::RateLimited { ts_ms } => {
                         if let Some(ts) = ts_ms {

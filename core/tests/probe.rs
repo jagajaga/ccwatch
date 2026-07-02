@@ -73,6 +73,29 @@ fn probe_emits_valid_snapshot() {
         "message": {"content": "rate limited"}
     });
     lines.push_str(&format!("{rl_line}\n"));
+    // Background agent: immediate ack must NOT finish it; a task-notification
+    // for a second one does.
+    for (id, desc) in [("toolu_bg1", "bg still running"), ("toolu_bg2", "bg completed")] {
+        let launch = serde_json::json!({
+            "type": "assistant",
+            "timestamp": rfc3339(now_ms - 15_000),
+            "message": {"content": [{"type": "tool_use", "id": id, "name": "Agent",
+                "input": {"description": desc, "subagent_type": "claude", "run_in_background": true}}]}
+        });
+        let ack = serde_json::json!({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": "started"}]}
+        });
+        lines.push_str(&format!("{launch}\n{ack}\n"));
+    }
+    lines.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "timestamp": rfc3339(now_ms - 5_000),
+            "message": {"content": "<task-notification><task-id>t1</task-id><tool-use-id>toolu_bg2</tool-use-id><status>completed</status></task-notification>"}
+        })
+    ));
     std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
 
     let tasks = root.join("tasks").join(sid);
@@ -120,11 +143,19 @@ fn probe_emits_valid_snapshot() {
         s.tokens_per_min
     );
 
-    // The agent came through, running.
-    assert_eq!(s.agents.len(), 1);
-    assert_eq!(s.agents[0].description, "remote scan");
-    assert_eq!(s.agents[0].subagent_type, "Explore");
-    assert!(matches!(s.agents[0].state, ccwatch_core::model::AgentState::Running));
+    // Agents: foreground running + two background with correct lifecycle.
+    use ccwatch_core::model::AgentState;
+    assert_eq!(s.agents.len(), 3);
+    let by_desc = |d: &str| s.agents.iter().find(|a| a.description == d).unwrap();
+    assert!(matches!(by_desc("remote scan").state, AgentState::Running));
+    assert!(
+        matches!(by_desc("bg still running").state, AgentState::Running),
+        "background ack must not finish the agent"
+    );
+    assert!(
+        matches!(by_desc("bg completed").state, AgentState::Finished),
+        "task-notification must finish the background agent"
+    );
 
     // The 429 came through.
     assert_eq!(snap.rate_limits.len(), 1);
