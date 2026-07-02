@@ -241,6 +241,17 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                 tokens(t.cache_read),
                 t.messages
             );
+            let procs = if sess.processes.is_empty() {
+                "no child processes".to_string()
+            } else {
+                let top: Vec<String> = sess
+                    .processes
+                    .iter()
+                    .take(3)
+                    .map(|p| format!("{} {:.0}%", p.name, p.cpu_pct))
+                    .collect();
+                format!("procs {} · {}", sess.processes.len(), top.join(" · "))
+            };
             let info = vec![
                 format!(
                     "{state} · {} · cpu {:.0}% · {} MB",
@@ -249,6 +260,7 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
                     sess.rss_mb
                 ),
                 format!("cwd {}", sess.cwd),
+                procs,
             ];
             let local = matches!(sess.host, Host::Local);
             let (action, kill_label) = if local {
@@ -325,6 +337,7 @@ mod tests {
             agents: vec![],
             tasks: vec![],
             watchers: vec![],
+            processes: vec![],
             host,
             remote_name: None,
         }
@@ -362,7 +375,8 @@ mod tests {
         assert_eq!(e.id, "id-webapp");
         assert_eq!(e.tokens_per_min, 40_000.0);
         assert!(e.tokens_line.contains("in ") && e.tokens_line.contains("msgs"));
-        assert_eq!(e.info.len(), 2);
+        assert_eq!(e.info.len(), 3);
+        assert!(e.info[2].contains("no child processes"));
         assert!(e.info[0].contains("running"));
         assert!(e.info[0].contains("opus-4-8"));
         assert!(e.info[1].contains("cwd /x"));

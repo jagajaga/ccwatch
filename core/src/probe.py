@@ -56,6 +56,65 @@ def parse_ts(ts):
         return None
 
 
+def parse_etime(e):
+    """[[dd-]hh:]mm:ss -> seconds."""
+    try:
+        days = 0
+        if "-" in e:
+            d, e = e.split("-", 1)
+            days = int(d)
+        parts = [int(x) for x in e.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0)
+        return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except Exception:
+        return 0
+
+
+def process_table():
+    """pid -> (ppid, cpu, rss_mb, run_secs, comm) for the whole system."""
+    table = {}
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pcpu=,rss=,etime=,comm="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        for line in out.splitlines():
+            f = line.split(None, 5)
+            if len(f) < 6:
+                continue
+            table[int(f[0])] = (int(f[1]), float(f[2]), int(f[3]) // 1024,
+                                parse_etime(f[4]), f[5])
+    except Exception:
+        pass
+    return table
+
+
+PROC_TABLE = process_table()
+
+
+def children_of(root, cap=12):
+    kids = {}
+    for pid, (ppid, *_rest) in PROC_TABLE.items():
+        kids.setdefault(ppid, []).append(pid)
+    out, queue = [], [root]
+    while queue:
+        p = queue.pop()
+        for c in kids.get(p, []):
+            queue.append(c)
+            ppid, cpu, rss, secs, comm = PROC_TABLE[c]
+            out.append({
+                "pid": c,
+                "name": os.path.basename(comm),
+                "cmd": comm,
+                "cpu_pct": cpu,
+                "rss_mb": rss,
+                "run_secs": secs,
+            })
+    out.sort(key=lambda x: (-x["cpu_pct"], -x["rss_mb"]))
+    return out[:cap]
+
+
 def proc_stat(pid):
     """(cpu_pct, rss_mb) via ps — portable across macOS and Linux."""
     try:
@@ -237,6 +296,7 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
         "agents": agents,
         "tasks": read_tasks(sid),
         "watchers": [],
+        "processes": children_of(pid),
         "host": {"kind": "local"},
         "remote_name": None,
     })

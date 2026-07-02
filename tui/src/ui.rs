@@ -383,7 +383,12 @@ fn agent_line(
 }
 
 fn draw_bottom_split(f: &mut Frame, area: Rect, app: &App) {
-    let halves = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+    let halves = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .split(area);
     let session = app.selected_session();
 
     // Tasks
@@ -411,6 +416,27 @@ fn draw_bottom_split(f: &mut Frame, area: Rect, app: &App) {
         halves[0],
     );
 
+    // Live child processes: what the session is literally running right now.
+    let pcount = session.map(|s| s.processes.len()).unwrap_or(0);
+    let pblock = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" PROCESSES ({pcount}) "));
+    let pitems: Vec<ListItem> = session
+        .map(|s| s.processes.iter().map(proc_item).collect())
+        .unwrap_or_default();
+    f.render_widget(
+        List::new(if pitems.is_empty() {
+            vec![ListItem::new(Span::styled(
+                "no child processes",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            pitems
+        })
+        .block(pblock),
+        halves[1],
+    );
+
     // Watchers
     let wblock = Block::default().borders(Borders::ALL).title(" WATCHERS ");
     let witems: Vec<ListItem> = session
@@ -423,8 +449,33 @@ fn draw_bottom_split(f: &mut Frame, area: Rect, app: &App) {
             witems
         })
         .block(wblock),
-        halves[1],
+        halves[2],
     );
+}
+
+fn proc_item(p: &ccwatch_core::model::ProcInfo) -> ListItem<'static> {
+    let cpu_color = if p.cpu_pct >= 50.0 {
+        Color::Red
+    } else if p.cpu_pct >= 10.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    ListItem::new(Line::from(vec![
+        Span::styled("● ", Style::default().fg(cpu_color)),
+        Span::styled(
+            format!("{:<14}", truncate(&p.name, 14)),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!("{:>4.0}% {:>5}M ", p.cpu_pct, p.rss_mb),
+            Style::default().fg(cpu_color),
+        ),
+        Span::styled(
+            format!("{} ", format::duration_ms(p.run_secs as i64 * 1000)),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]))
 }
 
 fn task_item(t: &ccwatch_core::model::Task) -> ListItem<'static> {
@@ -606,6 +657,14 @@ fn draw_details_popup(f: &mut Frame, area: Rect, app: &App) {
             for w in &s.watchers {
                 kv("watcher", format!("{:?} {} — {}", w.kind, w.name, w.detail));
             }
+            for p in &s.processes {
+                kv("process", format!(
+                    "{} (pid {}) {:.0}% · {} MB · up {} — {}",
+                    p.name, p.pid, p.cpu_pct, p.rss_mb,
+                    format::duration_ms(p.run_secs as i64 * 1000),
+                    p.cmd.chars().take(60).collect::<String>()
+                ));
+            }
         }
         Some(RowRef::Agent(si, path)) => {
             let s = &app.snapshot.sessions[si];
@@ -750,7 +809,7 @@ mod tests {
         let s = render(&app);
         for needle in [
             "ccwatch", "active", "ALERTS", "runaway", "webapp", "running", "TASKS", "do the thing",
-            "WATCHERS", "DETAILS", "cache-write",
+            "WATCHERS", "DETAILS", "cache-write", "PROCESSES (1)", "cargo",
         ] {
             assert!(s.contains(needle), "expected screen to contain {needle:?}\n{s}");
         }

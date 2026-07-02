@@ -253,6 +253,20 @@ pub struct Alert {
     pub since_ms: i64,
 }
 
+/// A child process spawned by a session (build, dev server, test run, …),
+/// discovered by walking the OS process tree under the session's pid.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcInfo {
+    pub pid: i32,
+    pub name: String,
+    /// Trimmed command line.
+    pub cmd: String,
+    pub cpu_pct: f32,
+    pub rss_mb: u64,
+    /// Seconds since the process started.
+    pub run_secs: u64,
+}
+
 /// One running/idle session with everything hanging off it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -274,6 +288,10 @@ pub struct Session {
     pub agents: Vec<Agent>,
     pub tasks: Vec<Task>,
     pub watchers: Vec<Watcher>,
+    /// Live child processes under this session's pid (workers, builds,
+    /// dev servers) — monitored, sorted hottest-first.
+    #[serde(default)]
+    pub processes: Vec<ProcInfo>,
     pub host: Host,
     /// For remote/cloud sessions: the name of the [`crate::remote::RemoteDef`]
     /// they came from, so a client can target it for cancel. `None` for local.

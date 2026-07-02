@@ -146,6 +146,8 @@ pub struct Engine {
     rate_limits: VecDeque<i64>,
     /// Last time ended-session transcripts were rescanned (epoch ms).
     last_ended_scan: i64,
+    /// Last full process-table scan (epoch ms) — needed for child discovery.
+    last_full_scan: i64,
 }
 
 impl Engine {
@@ -159,6 +161,7 @@ impl Engine {
             rate_limits: VecDeque::new(),
             // i64::MIN would overflow the subtraction; "long ago" is enough.
             last_ended_scan: -1,
+            last_full_scan: -1,
         }
     }
 
@@ -192,7 +195,14 @@ impl Engine {
         // a full process-table scan every tick is wasted CPU.
         let metas = sessions::read_sessions(&self.paths.sessions());
         let pids: Vec<i32> = metas.iter().filter_map(|m| m.pid).collect();
-        self.probe.refresh_pids(&pids);
+        // Child-process discovery needs the whole table; do that every ~5s and
+        // the cheap targeted refresh in between.
+        if now_ms - self.last_full_scan >= 5_000 {
+            self.last_full_scan = now_ms;
+            self.probe.refresh();
+        } else {
+            self.probe.refresh_pids(&pids);
+        }
 
         // Fold any new transcript bytes for each known session.
         for meta in &metas {
@@ -367,6 +377,10 @@ impl Engine {
                 agents,
                 tasks: session_tasks,
                 watchers,
+                processes: meta
+                    .pid
+                    .map(|p| self.probe.children_of(p, 12))
+                    .unwrap_or_default(),
                 host: Host::Local,
                 remote_name: None,
             });

@@ -509,6 +509,14 @@ pub(crate) mod test_support {
                 running: true,
                 pid: None,
             }],
+            processes: vec![ccwatch_core::model::ProcInfo {
+                pid: 777,
+                name: "cargo".into(),
+                cmd: "cargo build --release".into(),
+                cpu_pct: 87.0,
+                rss_mb: 512,
+                run_secs: 192,
+            }],
             host: Host::Local,
             remote_name: None,
         }

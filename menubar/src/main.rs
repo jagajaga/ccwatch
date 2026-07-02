@@ -94,7 +94,7 @@ mod macos {
     struct SessionRow {
         submenu: Submenu,
         spark: IconMenuItem,
-        info: [MenuItem; 2],
+        info: [MenuItem; 3],
         pause: MenuItem,
         resume: MenuItem,
         kill: MenuItem,
@@ -107,6 +107,7 @@ mod macos {
             let info = [
                 MenuItem::new(&entry.info[0], false, None),
                 MenuItem::new(&entry.info[1], false, None),
+                MenuItem::new(&entry.info[2], false, None),
             ];
             let pause = MenuItem::new("Pause (SIGSTOP)", entry.can_pause, None);
             let resume = MenuItem::new("Resume (SIGCONT)", entry.can_pause, None);

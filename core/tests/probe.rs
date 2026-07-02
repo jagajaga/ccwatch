@@ -160,6 +160,13 @@ fn probe_emits_valid_snapshot() {
     // The 429 came through.
     assert_eq!(snap.rate_limits.len(), 1);
 
+    // Child processes came through (the probe itself is a child of our pid).
+    assert!(
+        s.processes.iter().any(|p| p.name.to_lowercase().contains("python")),
+        "probe should see itself in the session's process tree: {:?}",
+        s.processes
+    );
+
     // Tasks came through.
     assert_eq!(s.tasks.len(), 1);
     assert_eq!(s.tasks[0].subject, "remote todo");

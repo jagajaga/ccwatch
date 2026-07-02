@@ -322,6 +322,7 @@ mod tests {
             agents: vec![],
             tasks: vec![],
             watchers: vec![],
+            processes: vec![],
             host: Host::Local,
             remote_name: None,
         });
