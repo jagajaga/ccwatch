@@ -293,6 +293,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
 fn state_span(state: SessionState, w: &Widths) -> Span<'static> {
     let (txt, color) = match state {
         SessionState::Running => ("running", Color::Green),
+        SessionState::Waiting => ("waiting", Color::Cyan),
         SessionState::Idle => ("idle", Color::Gray),
         SessionState::Ended => ("ended", Color::Gray),
     };

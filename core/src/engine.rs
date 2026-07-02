@@ -291,15 +291,6 @@ impl Engine {
             };
 
             let last_activity = accum.last_activity.or(meta.started_at);
-            let state = if let Some(la) = last_activity {
-                if now_ms - la <= self.config.idle_secs * 1000 {
-                    SessionState::Running
-                } else {
-                    SessionState::Idle
-                }
-            } else {
-                SessionState::Running
-            };
 
             let stat = meta
                 .pid
@@ -322,6 +313,16 @@ impl Engine {
                 .collect();
             activity.sort_by_key(|a| a.since_ms);
             activity.truncate(6);
+
+            // State: generating recently → running; otherwise a pending tool
+            // call means "waiting" (a build, a permission prompt, a question)
+            // — which burns time but zero tokens; else idle.
+            let state = match last_activity {
+                Some(la) if now_ms - la <= self.config.idle_secs * 1000 => SessionState::Running,
+                _ if !activity.is_empty() => SessionState::Waiting,
+                Some(_) => SessionState::Idle,
+                None => SessionState::Running,
+            };
 
             // Agents (clone tree into model form).
             let agents: Vec<Agent> = accum.agents.iter().map(AgentAccum::to_model).collect();

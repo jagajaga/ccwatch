@@ -101,6 +101,49 @@ fn refresh_builds_session_with_tokens_tasks_and_runaway_alert() {
 }
 
 #[test]
+fn pending_tool_with_stale_generation_is_waiting_not_idle() {
+    let now: i64 = 1_800_000_000_000;
+    let root = std::env::temp_dir().join(format!("ccw-engine-wait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pid = std::process::id() as i32;
+    let sid = "sess-wait";
+
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::write(
+        root.join("sessions").join(format!("{pid}.json")),
+        format!(r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/tmp/w","startedAt":{},"name":"waiter"}}"#, now - 900_000),
+    )
+    .unwrap();
+    let proj = root.join("projects").join("-tmp-w");
+    std::fs::create_dir_all(&proj).unwrap();
+    // Last generation 10 min ago (past the 2-min idle threshold), which
+    // launched a Bash call that never returned — a long build or a
+    // permission prompt. That's waiting, not idle.
+    let line = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now - 600_000),
+        "message": {
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+            "content": [{"type": "tool_use", "id": "toolu_wait", "name": "Bash",
+                         "input": {"command": "cargo build --release"}}]
+        }
+    });
+    std::fs::write(proj.join(format!("{sid}.jsonl")), format!("{line}
+")).unwrap();
+
+    let mut engine = Engine::new(Paths::new(&root), Config::default());
+    let snap = engine.refresh(now);
+    let s = &snap.sessions[0];
+    assert_eq!(s.state, SessionState::Waiting, "pending tool + no generation = waiting");
+    assert_eq!(s.activity.len(), 1);
+    assert_eq!(s.activity[0].detail, "cargo build --release");
+    // And zero burn: waiting costs time, not tokens.
+    assert_eq!(s.tokens_per_min, 0.0);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn incremental_ingest_accumulates_across_refreshes() {
     let now: i64 = 1_800_000_000_000;
     let root = std::env::temp_dir().join(format!("ccw-engine-it2-{}", std::process::id()));

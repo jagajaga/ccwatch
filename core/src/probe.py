@@ -297,7 +297,12 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
     )
     tpm = window_billable / (WINDOW_MS / 60000.0)
     last = last_act or meta.get("startedAt")
-    state = "running" if (last is None or NOW_MS - last <= IDLE_MS) else "idle"
+    if last is None or NOW_MS - last <= IDLE_MS:
+        state = "running"
+    elif activity:
+        state = "waiting"  # tool/permission pending: time, not tokens
+    else:
+        state = "idle"
     cpu, rss = proc_stat(pid)
 
     sessions.append({

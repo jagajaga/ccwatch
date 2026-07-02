@@ -84,6 +84,10 @@ impl TokenLedger {
 pub enum SessionState {
     /// pid alive and activity within the idle threshold.
     Running,
+    /// pid alive, a tool call is pending (build, permission prompt, a
+    /// question for the user), but the model isn't generating — costs time,
+    /// not tokens.
+    Waiting,
     /// pid alive but no recent activity.
     Idle,
     /// pid gone. Never displayed; retained only transiently in the engine.

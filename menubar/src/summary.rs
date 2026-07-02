@@ -229,6 +229,7 @@ pub fn menu_model(s: &Snapshot) -> MenuModel {
             };
             let state = match sess.state {
                 SessionState::Running => "running",
+                SessionState::Waiting => "waiting",
                 SessionState::Idle => "idle",
                 SessionState::Ended => "ended",
             };
