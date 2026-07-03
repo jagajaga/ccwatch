@@ -106,17 +106,17 @@ upgrades *and* downgrades self-correct. Zero config.
 ## Install
 
 **The macOS app** (menu bar + dashboard window) — native SwiftUI, **macOS 14+**.
-Grab `Redline-*.zip` from the
-[latest release](https://github.com/jagajaga/redline/releases/latest), unzip,
-drop `Redline.app` into `/Applications`, open it. It opens the dashboard window
-by default and lives in the menu bar. The binary is unsigned, so the first
-launch needs one of:
+Grab `Redline-*.dmg` from the
+[latest release](https://github.com/jagajaga/redline/releases/latest), open it,
+and drag `Redline.app` into Applications. It opens the dashboard window by
+default and lives in the menu bar. The app is unsigned, so the first launch
+needs a right-click → **Open** → **Open**, or:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Redline.app
 ```
 
-(or right-click → Open → Open). Flip **Start with menu bar only** to launch
+(A plain `Redline-*.zip` is in the release too, if you prefer.) Flip **Start with menu bar only** to launch
 tray-only, and **Start at login** to have it always there.
 
 **Terminal UI only** — grab `ccwatch-*-macos-universal.tar.gz` from the same
