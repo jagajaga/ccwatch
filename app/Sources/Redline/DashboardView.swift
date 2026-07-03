@@ -20,9 +20,7 @@ struct DashboardView: View {
         if let snap = store.snap {
             VStack(spacing: 0) {
                 header(snap)
-                if !snap.alerts.isEmpty {
-                    AlertsBanner(alerts: snap.alerts)
-                }
+                AlertsBanner(alerts: snap.alerts)
                 Divider().opacity(0.4)
                 SessionTree(snap: snap, store: store,
                             hideDone: hideDone, hideInactive: hideInactive)
@@ -236,8 +234,18 @@ struct AlertsBanner: View {
     let alerts: [Alert]
 
     var body: some View {
+        // Leak alerts only; the wall projection lives in the Governor gauge.
+        let leaks = alerts.filter { $0.kind != "budget_wall" }
+        if leaks.isEmpty {
+            EmptyView()
+        } else {
+            banner(leaks)
+        }
+    }
+
+    private func banner(_ leaks: [Alert]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(alerts) { a in
+            ForEach(leaks) { a in
                 HStack(spacing: 8) {
                     Image(systemName: a.severity == "critical" ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(a.severity == "critical" ? Palette.red : Palette.orange)
@@ -267,11 +275,12 @@ struct TotalsStrip: View {
             stat("\(totals.activeSessions)", "active")
             stat(Fmt.rate(totals.tokensPerMin), "burn")
             stat(String(format: "%.0f%%", totals.cacheHitPct), "cache")
-            if !alerts.isEmpty {
+            let leaks = alerts.filter { $0.kind != "budget_wall" }
+            if !leaks.isEmpty {
                 Spacer()
                 HStack(spacing: 5) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Palette.orange)
-                    Text("\(alerts.count)").font(.callout.weight(.semibold))
+                    Text("\(leaks.count)").font(.callout.weight(.semibold))
                 }
             }
         }

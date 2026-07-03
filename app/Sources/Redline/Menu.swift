@@ -83,7 +83,8 @@ struct MenuContent: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                 paceLine(g, snap.generatedAt)
             }
-            ForEach(snap.alerts.prefix(3)) { a in
+            // Leak alerts only — the wall projection is already the pace line above.
+            ForEach(snap.alerts.filter { $0.kind != "budget_wall" }.prefix(3)) { a in
                 Text("⚠ \(a.subject): \(a.message)")
                     .font(.caption2)
                     .foregroundStyle(a.severity == "critical" ? Palette.red : Palette.orange)

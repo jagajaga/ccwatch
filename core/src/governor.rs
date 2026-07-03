@@ -447,16 +447,18 @@ pub fn weekly_wall_alert(g: &GovernorStatus, now_ms: i64) -> Option<Alert> {
     if t.rate_per_min < 1.0 {
         return None;
     }
-    let days = (reset - now_ms) as f64 / 86_400_000.0;
     let to_wall_h = (wall - now_ms) as f64 / 3_600_000.0;
+    // How far *ahead* of the reset you'd hit the wall (reset − wall), not
+    // time-from-now-to-reset.
+    let ahead_of_reset_d = (reset - wall) as f64 / 86_400_000.0;
     Some(Alert {
         severity: Severity::Critical,
         kind: AlertKind::BudgetWall,
         subject: "weekly limit".into(),
         session_id: String::new(),
         message: format!(
-            "at this pace you hit the weekly limit in ~{:.0}h — {:.1}d before reset",
-            to_wall_h, days
+            "at this pace you hit the weekly limit in ~{:.0}h — {:.1}d before it resets",
+            to_wall_h, ahead_of_reset_d
         ),
         since_ms: now_ms,
     })
