@@ -119,22 +119,33 @@ The number that matters is the **throttle**. The rule is dead simple:
 
 ## Install
 
-**The macOS app** (menu bar + dashboard window) — native SwiftUI, **macOS 14+**.
-Grab `Redline-*.dmg` from the
-[latest release](https://github.com/jagajaga/redline/releases/latest), open it,
-and drag `Redline.app` into Applications. It opens the dashboard window by
-default and lives in the menu bar. The app is unsigned, so the first launch
-needs a right-click → **Open** → **Open**, or:
+Grab the [**latest release**](https://github.com/jagajaga/redline/releases/latest).
+Every release is a **universal** build (Apple Silicon + Intel) and ships:
+
+| Asset | What it is |
+|---|---|
+| `Redline-*.dmg` | the macOS app — drag-to-`/Applications` installer |
+| `Redline-*.zip` | the same `Redline.app`, zipped (if you prefer) |
+| `ccwatch-*-macos-universal.tar.gz` | the terminal UI + daemon (`ccwatch`, `ccwatchd`) |
+| `checksums.txt` | SHA-256 of every asset |
+
+### The macOS app (menu bar + dashboard window)
+
+Native SwiftUI, **macOS 14+**. Open `Redline-*.dmg` and drag **Redline.app** into
+**Applications**. It opens the dashboard window by default and lives in the menu
+bar (`ccwatchd` + the TUI ride along inside the bundle — nothing else to install).
+
+The app is unsigned, so the **first launch** needs a right-click → **Open** →
+**Open**, or:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Redline.app
 ```
 
-(A plain `Redline-*.zip` is in the release too, if you prefer.) Flip **Start with menu bar only** to launch
-tray-only, and **Start at login** to have it always there.
+Then flip **Start with menu bar only** to launch tray-only, and **Start at login**
+to keep it there.
 
-**Terminal UI only** — grab `ccwatch-*-macos-universal.tar.gz` from the same
-release:
+### Terminal UI only
 
 ```sh
 tar xzf ccwatch-*-macos-universal.tar.gz
@@ -142,11 +153,11 @@ mv ccwatch/ccwatch ccwatch/ccwatchd /usr/local/bin/   # or anywhere on PATH
 ccwatch
 ```
 
-**From source:**
+### From source
 
 ```sh
-cargo build --release && ./target/release/ccwatch   # daemon + TUI
-swift build -c release --package-path app            # the macOS app
+cargo build --release && ./target/release/ccwatch   # daemon + TUI (Rust)
+swift build -c release --package-path app            # the macOS app (Swift)
 ```
 
 No setup. No accounts. No telemetry. The daemon starts itself and exits when the
