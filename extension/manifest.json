@@ -5,7 +5,7 @@
   "description": "Reads your Claude plan-usage limits from claude.ai and forwards them to the local Redline daemon. No data leaves your machine.",
   "permissions": ["alarms", "storage"],
   "host_permissions": ["https://claude.ai/*", "http://127.0.0.1/*"],
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js", "scripts": ["background.js"] },
   "action": {
     "default_title": "Redline Usage Bridge",
     "default_popup": "popup.html",
@@ -18,6 +18,6 @@
     "128": "icons/icon128.png"
   },
   "browser_specific_settings": {
-    "gecko": { "id": "redline-usage-bridge@jagajaga.github.io", "strict_min_version": "121.0" }
+    "gecko": { "id": "redline-usage-bridge@jagajaga.github.io", "strict_min_version": "115.0" }
   }
 }
