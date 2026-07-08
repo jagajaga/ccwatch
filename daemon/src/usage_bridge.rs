@@ -104,24 +104,54 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Best-effort extraction of (session, weekly) percentages from the usage JSON.
-/// The exact field names are learned from the persisted `usage.json`; until then
-/// we scan for utilization-like numbers tagged session-ish vs weekly-ish.
+fn as_pct(v: &Value) -> Option<u8> {
+    let n = v.as_f64()?;
+    let pct = if n <= 1.0 { n * 100.0 } else { n };
+    if (0.0..=100.0).contains(&pct) {
+        Some(pct.round() as u8)
+    } else {
+        None
+    }
+}
+
+/// Extract (session, weekly) percentages from the claude.ai usage JSON. Uses the
+/// known shape first (`five_hour`/`seven_day` utilization and the `limits` array
+/// keyed by `kind`), falling back to a generic scan if the shape ever changes.
 fn parse_usage(v: &Value, now_ms: i64) -> (Option<UsagePct>, Option<UsagePct>) {
+    let mut session = v.get("five_hour").and_then(|o| o.get("utilization")).and_then(as_pct);
+    let mut weekly = v.get("seven_day").and_then(|o| o.get("utilization")).and_then(as_pct);
+
+    // The `limits` array is the authoritative list; confirm/fill from it.
+    if let Some(limits) = v.get("limits").and_then(Value::as_array) {
+        for lim in limits {
+            let kind = lim.get("kind").and_then(Value::as_str).unwrap_or("");
+            let pct = lim.get("percent").and_then(as_pct);
+            match kind {
+                "session" if session.is_none() => session = pct,
+                "weekly_all" if weekly.is_none() => weekly = pct,
+                _ => {}
+            }
+        }
+    }
+
+    // Fallback: generic scan if the known fields weren't present.
+    if session.is_none() || weekly.is_none() {
+        let (hs, hw) = scan_usage(v);
+        session = session.or(hs);
+        weekly = weekly.or(hw);
+    }
+
+    let mk = |p: Option<u8>| p.filter(|&p| p > 0).map(|pct| UsagePct { pct, at_ms: now_ms });
+    (mk(session), mk(weekly))
+}
+
+/// Generic fallback scan — tag utilization-like numbers session-ish vs weekly-ish
+/// by nearby key/label text. Used only if the known shape is absent.
+fn scan_usage(v: &Value) -> (Option<u8>, Option<u8>) {
     let mut session: Option<u8> = None;
     let mut weekly: Option<u8> = None;
     // Weekly "all models" should win over any per-model weekly figure.
     let mut weekly_all = false;
-
-    fn as_pct(v: &Value) -> Option<u8> {
-        let n = v.as_f64()?;
-        let pct = if n <= 1.0 { n * 100.0 } else { n };
-        if (0.0..=100.0).contains(&pct) {
-            Some(pct.round() as u8)
-        } else {
-            None
-        }
-    }
 
     fn walk(
         v: &Value,
@@ -181,6 +211,25 @@ fn parse_usage(v: &Value, now_ms: i64) -> (Option<UsagePct>, Option<UsagePct>) {
     }
 
     walk(v, "", &mut session, &mut weekly, &mut weekly_all);
-    let mk = |p: Option<u8>| p.filter(|&p| p > 0).map(|pct| UsagePct { pct, at_ms: now_ms });
-    (mk(session), mk(weekly))
+    (session, weekly)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_real_claude_usage_shape() {
+        // The actual claude.ai /usage response (trimmed): five_hour + seven_day
+        // utilization, plus a `limits` array. extra_usage/spend at 100% must NOT
+        // leak into the tanks.
+        let raw = r#"{"five_hour":{"utilization":46},"seven_day":{"utilization":10},
+            "extra_usage":{"utilization":100},"spend":{"percent":100},
+            "limits":[{"kind":"session","percent":46},
+                      {"kind":"weekly_all","percent":10},
+                      {"kind":"weekly_scoped","percent":9,"scope":{"model":{"display_name":"Fable"}}}]}"#;
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let (s, w) = parse_usage(&v, 1000);
+        assert_eq!(s.map(|u| u.pct), Some(46));
+        assert_eq!(w.map(|u| u.pct), Some(10));
+    }
 }
