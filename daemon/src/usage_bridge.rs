@@ -27,6 +27,9 @@ const PORT: u16 = 47615;
 /// refresher reads. Never fails hard: if the port is taken we just don't bridge.
 pub fn spawn(ccwatch_dir: PathBuf, now_ms: impl Fn() -> i64 + Send + 'static) -> SharedUsage {
     let store: SharedUsage = Arc::new(RwLock::new(LiveUsage::default()));
+    // Seed from the last persisted reading so a daemon restart doesn't drop the
+    // Governor back to estimates until the extension's next (~2-min) poll.
+    seed_from_disk(&ccwatch_dir, &store);
     let listener = match TcpListener::bind(("127.0.0.1", PORT)) {
         Ok(l) => l,
         Err(e) => {
@@ -42,6 +45,53 @@ pub fn spawn(ccwatch_dir: PathBuf, now_ms: impl Fn() -> i64 + Send + 'static) ->
         }
     });
     out
+}
+
+/// Load the last persisted `usage.json` into the store on startup, but only if
+/// it's recent — stale usage would wrongly anchor the Governor to an old %. The
+/// reading's timestamp is the file's mtime (when the % was actually true).
+fn seed_from_disk(dir: &std::path::Path, store: &SharedUsage) {
+    let path = dir.join("usage.json");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    let fresh = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs() < 15 * 60)
+        .unwrap_or(false);
+    if !fresh {
+        return;
+    }
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    // Same shape the POST handler parses: the body may wrap the usage object.
+    let usage = v.get("usage").unwrap_or(&v);
+    let (session, weekly) = parse_usage(usage, mtime_ms);
+    if let Ok(mut s) = store.write() {
+        if session.is_some() {
+            s.session = session;
+        }
+        if weekly.is_some() {
+            s.weekly = weekly;
+        }
+    }
+    eprintln!(
+        "usage bridge: seeded from usage.json (session={:?} weekly={:?})",
+        session.map(|u| u.pct),
+        weekly.map(|u| u.pct)
+    );
 }
 
 fn handle(mut stream: std::net::TcpStream, store: &SharedUsage, dir: &std::path::Path, now_ms: i64) {
@@ -231,5 +281,67 @@ mod tests {
         let (s, w) = parse_usage(&v, 1000);
         assert_eq!(s.map(|u| u.pct), Some(46));
         assert_eq!(w.map(|u| u.pct), Some(10));
+    }
+
+    #[test]
+    fn seeds_store_from_fresh_usage_json() {
+        // A restart should recover the last reading from disk. The file is the
+        // POST body — the usage object wrapped under "usage", as the extension
+        // sends it.
+        let dir = std::env::temp_dir().join(format!("ccwatch-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("usage.json"),
+            r#"{"org":"x","at":1,"usage":{"five_hour":{"utilization":33},"seven_day":{"utilization":8}}}"#,
+        )
+        .unwrap();
+        let store: SharedUsage = Arc::new(RwLock::new(LiveUsage::default()));
+        seed_from_disk(&dir, &store);
+        let live = *store.read().unwrap();
+        assert_eq!(live.session.map(|u| u.pct), Some(33));
+        assert_eq!(live.weekly.map(|u| u.pct), Some(8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignores_stale_usage_json() {
+        // A day-old file must not anchor the Governor to an ancient %.
+        let dir = std::env::temp_dir().join(format!("ccwatch-seed-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        std::fs::write(&path, r#"{"five_hour":{"utilization":99}}"#).unwrap();
+        // Backdate the file well past the freshness window.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600 * 24);
+        filetime_set(&path, old);
+        let store: SharedUsage = Arc::new(RwLock::new(LiveUsage::default()));
+        seed_from_disk(&dir, &store);
+        assert!(store.read().unwrap().session.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Minimal mtime backdating without pulling in a crate: reopen and set times
+    // via a fresh write is not enough (updates mtime to now), so use `utimes`.
+    fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
+        use std::os::unix::ffi::OsStrExt;
+        let secs = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let tv = [
+            libc_timeval { tv_sec: secs, tv_usec: 0 },
+            libc_timeval { tv_sec: secs, tv_usec: 0 },
+        ];
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            utimes(c.as_ptr(), tv.as_ptr());
+        }
+    }
+    #[repr(C)]
+    struct libc_timeval {
+        tv_sec: i64,
+        tv_usec: i64,
+    }
+    extern "C" {
+        fn utimes(path: *const std::ffi::c_char, times: *const libc_timeval) -> i32;
     }
 }
