@@ -28,17 +28,19 @@ echo "chrome  -> $CZIP"
 : "${AMO_API_KEY:=${WEB_EXT_API_KEY:-}}"
 : "${AMO_API_SECRET:=${WEB_EXT_API_SECRET:-}}"
 if [ -n "${AMO_API_KEY:-}" ] && [ -n "${AMO_API_SECRET:-}" ]; then
-  npx --yes web-ext@latest sign \
+  # Non-fatal: AMO rejects re-signing an already-signed version, and we don't
+  # want that to fail a whole release. Bump the version to get a fresh sign.
+  if npx --yes web-ext@latest sign \
     --source-dir="$DIR" \
     --channel=unlisted \
     --api-key="$AMO_API_KEY" \
     --api-secret="$AMO_API_SECRET" \
-    --artifacts-dir="$OUT"
-  # Normalize the signed artifact name.
-  XPI="$(ls -t "$OUT"/*.xpi 2>/dev/null | head -1 || true)"
-  if [ -n "$XPI" ]; then
-    mv -f "$XPI" "$OUT/redline-usage-bridge-firefox-$VER.xpi"
+    --artifacts-dir="$OUT"; then
+    XPI="$(ls -t "$OUT"/*.xpi 2>/dev/null | head -1 || true)"
+    [ -n "$XPI" ] && mv -f "$XPI" "$OUT/redline-usage-bridge-firefox-$VER.xpi"
     echo "firefox -> $OUT/redline-usage-bridge-firefox-$VER.xpi (signed)"
+  else
+    echo "firefox -> signing failed (version $VER already on AMO?) — Chrome zip still produced"
   fi
 else
   echo "firefox -> skipped (set AMO_API_KEY + AMO_API_SECRET to sign the .xpi)"

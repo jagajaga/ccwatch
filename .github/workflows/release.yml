@@ -85,6 +85,17 @@ jobs:
           AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
           AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
         run: |
+          # AMO won't re-sign a version it has already signed, so stamp the
+          # extension with this release's version (always increasing) to get a
+          # fresh signature every release.
+          ver="${GITHUB_REF_NAME#v}"
+          python3 - "$ver" <<'PY'
+          import json, sys
+          p = "extension/manifest.json"
+          d = json.load(open(p))
+          d["version"] = sys.argv[1]
+          json.dump(d, open(p, "w"), indent=2)
+          PY
           bash extension/pack.sh dist-ext
           cp dist-ext/redline-usage-bridge-* . 2>/dev/null || true
       - name: Checksums
