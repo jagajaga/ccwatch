@@ -15,6 +15,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$DIR/../dist-ext}"
 mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"  # absolute — we cd into $DIR before zipping
 VER="$(python3 -c "import json;print(json.load(open('$DIR/manifest.json'))['version'])")"
 
 # --- Chrome / Chromium ---
