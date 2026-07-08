@@ -82,6 +82,16 @@ struct MenuContent: View {
                 Text("5h resets \(Fmt.clock(g.window.resetsAt)) · weekly resets \(Fmt.resetLabel(g.week?.resetsAt))")
                     .font(.caption2).foregroundStyle(.tertiary)
                 paceLine(g, snap.generatedAt)
+                // Nudge to install the extension whenever the Governor lacks exact
+                // (reported) usage — it's the only way to match Claude to the percent.
+                if g.window.budgetSource != "reported"
+                    && (g.week?.budgetSource ?? "unknown") != "reported" {
+                    Link(destination: URL(string: "https://jagajaga.me/redline")!) {
+                        Label("Install the browser extension for exact limits",
+                              systemImage: "puzzlepiece.extension")
+                    }
+                    .font(.caption2).foregroundStyle(Palette.teal).buttonStyle(.plain)
+                }
             }
             // Leak alerts only — the wall projection is already the pace line above.
             ForEach(snap.alerts.filter { $0.kind != "budget_wall" }.prefix(3)) { a in

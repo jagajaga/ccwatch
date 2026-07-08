@@ -14,19 +14,19 @@ Every session, every agent, every token — every machine.
 
 ---
 
-Claude Code will happily burn your entire 5-hour window while you're at lunch.
-Sessions pile up, agents spawn agents, a server grinds all night — and the
-first you hear is **"limit reached, resets at 03:00."**
+Claude Code can quietly run through your 5-hour window while you're away —
+sessions pile up, agents spawn agents, and the first you hear of it is
+**"limit reached, resets at 03:00."**
 
-Redline already knows. It was watching.
+Redline shows where your tokens are going, live.
 
 ## Three faces, one daemon
 
-A tiny background daemon (`ccwatchd`) tails `~/.claude`, computes rates, alerts
-and the Governor, and serves it over a local socket. On top of that sit **three
-views** — use whichever you like, together or alone.
+A small background daemon (`ccwatchd`) tails `~/.claude`, computes rates, alerts
+and the Governor, and serves it over a local socket. It has **three views** —
+menu bar, dashboard, and terminal.
 
-### 🍎 Menu bar
+### Menu bar
 
 ![Redline menu bar](docs/screenshot-menubar.svg)
 
@@ -46,7 +46,7 @@ pushing your limit. Click it for a popover:
   **Start with menu bar only** and **Start at login**.
 - Footer buttons: **TUI** (opens the terminal view) and **Dashboard**.
 
-### 🪟 Dashboard window
+### Dashboard window
 
 ![Redline dashboard window](docs/screenshot-gui.svg)
 
@@ -61,7 +61,7 @@ expand** list of every session revealing everything it's doing:
 **Hide inactive** / **Hide done** filter the list. The Dock icon appears
 **only while the window is open**; close it and Redline lives in the menu bar.
 
-### 🖥 Terminal UI
+### Terminal UI
 
 ![Redline terminal UI](docs/screenshot-tui.svg)
 
@@ -76,7 +76,7 @@ alerts. Run `ccwatch`, or hit **TUI** in the menu-bar popover.
 ## The Governor
 
 A fuel gauge for your real plan limits — both the 5-hour window *and* the weekly
-cap. With the [browser extension](#-browser-extension-usage-bridge) it reads your
+cap. With the [browser extension](#browser-extension-usage-bridge) it reads your
 **exact** usage % straight from claude.ai, so the gauge matches Claude to the
 percent. Without it, Redline anchors to any usage markers Claude Code writes into
 its transcripts, and otherwise learns the ceiling from your own 429 walls.
@@ -107,17 +107,17 @@ The number that matters is the **throttle**. The rule is dead simple:
 
 ## What else it tracks
 
-- 🖥 **Fleet view** — all sessions, all machines: burn, tokens, cpu/ram, last
+- **Fleet view** — all sessions, all machines: burn, tokens, cpu/ram, last
   activity, the same titles Claude's UI uses.
-- 🔍 **Live activity** — `✎ Edit engine.rs` · `⚙ cargo build 87%` — in-flight
+- **Live activity** — `✎ Edit engine.rs` · `⚙ cargo build 87%` — in-flight
   tool calls *and* real child processes, per session.
-- 🤖 **Agents** — who spawned what, nested, with truthful running/done state.
+- **Agents** — who spawned what, nested, with truthful running/done state.
   Even nested subagents (workflow-spawned, in git worktrees) get their tokens
   attributed and show as **active** while they burn.
-- 🚨 **Leak alerts** — runaway loops, cache bleed, agent storms, sessions
+- **Leak alerts** — runaway loops, cache bleed, agent storms, sessions
   burning while "idle", servers gone dark.
-- 🔪 **Kill switch** — kill / pause / resume from any surface, with confirmation.
-- 🛰 **Remote machines, zero install** — one line of JSON; a python probe rides
+- **Kill switch** — kill / pause / resume from any surface, with confirmation.
+- **Remote machines, zero install** — one line of JSON; a python probe rides
   over ssh, nothing gets installed.
 
 ## Install
@@ -158,7 +158,7 @@ mv ccwatch/ccwatch ccwatch/ccwatchd /usr/local/bin/   # or anywhere on PATH
 ccwatch
 ```
 
-### 🧩 Browser extension (Usage Bridge)
+### Browser extension (Usage Bridge)
 
 Claude's exact usage % lives behind Cloudflare, so a background app can't read
 it. The **Usage Bridge** runs inside your logged-in browser — the clean way past

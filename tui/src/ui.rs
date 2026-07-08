@@ -13,7 +13,8 @@ const BURN_RED: f64 = 40_000.0;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let alert_h = (app.snapshot.alerts.len() as u16).clamp(1, 4) + 2;
+    let alert_h =
+        ((app.snapshot.alerts.len() + governor_estimated(app) as usize) as u16).clamp(1, 5) + 2;
     let chunks = Layout::vertical([
         Constraint::Length(1),        // top bar
         Constraint::Length(alert_h),  // alerts
@@ -66,6 +67,18 @@ fn governor_segment(app: &App) -> String {
         }
     }
     seg
+}
+
+/// True when the Governor is running on estimates (config/learned budgets)
+/// rather than Claude's own reported usage %. That's when we recommend the
+/// browser extension, which feeds exact 5h/weekly percentages.
+fn governor_estimated(app: &App) -> bool {
+    let Some(g) = &app.snapshot.governor else {
+        return false;
+    };
+    let reported =
+        |t: &ccwatch_core::model::Tank| t.budget_source == ccwatch_core::model::BudgetSource::Reported;
+    !reported(&g.window) && g.week.as_ref().map_or(true, |w| !reported(w))
 }
 
 fn draw_topbar(f: &mut Frame, area: Rect, app: &App) {
@@ -136,7 +149,20 @@ fn draw_alerts(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" ALERTS ({}) ", app.snapshot.alerts.len()));
-    if app.snapshot.alerts.is_empty() {
+    let mut items: Vec<ListItem> = Vec::new();
+    // Nudge to install the browser extension whenever the Governor lacks exact
+    // (reported) usage — shown first so it's never pushed off by alerts.
+    if governor_estimated(app) {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("ⓘ ", Style::default().fg(Color::Green)),
+            Span::styled(
+                "install the Usage Bridge browser extension for exact limits — jagajaga.me/redline",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+        ])));
+    }
+    items.extend(app.snapshot.alerts.iter().map(|a| ListItem::new(alert_line(a))));
+    if items.is_empty() {
         let p = Paragraph::new(Line::from(Span::styled(
             "no leaks detected",
             Style::default().fg(Color::DarkGray),
@@ -145,12 +171,6 @@ fn draw_alerts(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(p, area);
         return;
     }
-    let items: Vec<ListItem> = app
-        .snapshot
-        .alerts
-        .iter()
-        .map(|a| ListItem::new(alert_line(a)))
-        .collect();
     f.render_widget(List::new(items).block(block), area);
 }
 

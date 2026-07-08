@@ -44,6 +44,16 @@ struct DashboardView: View {
             governorHero(snap)
             VStack(alignment: .leading, spacing: 14) {
                 LimitsCard(governor: snap.governor)
+                // Recommend the extension while the Governor runs on estimates.
+                if let g = snap.governor,
+                   g.window.budgetSource != "reported",
+                   (g.week?.budgetSource ?? "unknown") != "reported" {
+                    Link(destination: URL(string: "https://jagajaga.me/redline")!) {
+                        Label("Install the browser extension for exact limits",
+                              systemImage: "puzzlepiece.extension")
+                    }
+                    .font(.caption).foregroundStyle(Palette.teal).buttonStyle(.plain)
+                }
                 MixBar(mix: snap.modelMix)
                 TotalsStrip(totals: snap.totals, alerts: snap.alerts)
             }
