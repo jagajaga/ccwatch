@@ -401,6 +401,23 @@ impl Engine {
         let hit_cutoff = now_ms - 15 * 24 * 3_600_000;
         self.limit_hits.retain(|h| h.at_ms >= hit_cutoff);
 
+        // Drop accumulators for sessions that are neither alive nor recently
+        // active. Without this, every historical session the sidechain scan ever
+        // touched would linger in memory with its whole agent tree, growing the
+        // daemon's RSS (and, via alive long-runners, the snapshots) unbounded.
+        {
+            let alive: std::collections::HashSet<&str> = metas
+                .iter()
+                .filter(|m| m.pid.map(|p| self.probe.is_alive(p)).unwrap_or(false))
+                .map(|m| m.session_id.as_str())
+                .collect();
+            let acc_cutoff = now_ms - retention_ms;
+            self.accums.retain(|sid, a| {
+                alive.contains(sid.as_str())
+                    || a.last_activity.map(|la| la >= acc_cutoff).unwrap_or(false)
+            });
+        }
+
         let mut out_sessions = Vec::new();
         let mut alerts = Vec::new();
 
@@ -832,6 +849,11 @@ impl Engine {
     /// returning `(sid, subagents_dir)`. The session id is the directory name
     /// that holds `subagents/`, matching the id used everywhere else.
     fn discover_subagent_dirs(&self) -> Vec<(String, PathBuf)> {
+        // Only recently-modified subagent dirs — a global scan of every session
+        // ever would resurrect thousands of historical subagents into memory and
+        // bloat every snapshot. Freshness uses the real wall clock (file mtimes
+        // are wall-clock), independent of the engine's simulated `now_ms`.
+        let retain_secs = self.config.retention_secs() as u64;
         let mut out = Vec::new();
         let Ok(projects) = std::fs::read_dir(self.paths.projects()) else {
             return out;
@@ -842,7 +864,13 @@ impl Engine {
             };
             for sd in session_dirs.flatten() {
                 let sub = sd.path().join("subagents");
-                if sub.is_dir() {
+                let recent = std::fs::metadata(&sub)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|age| age.as_secs() <= retain_secs)
+                    .unwrap_or(false);
+                if recent {
                     if let Some(sid) = sd.path().file_name().and_then(|n| n.to_str()) {
                         out.push((sid.to_string(), sub));
                     }

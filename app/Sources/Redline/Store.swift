@@ -8,6 +8,14 @@ final class DaemonClient: @unchecked Sendable {
     var onSnapshot: ((Snapshot) -> Void)?
     var onConnection: ((Bool) -> Void)?
 
+    // Coalesced main-thread delivery: the daemon pushes ~2/sec, but if the UI is
+    // mid-render the async closures (each holding a whole Snapshot) would pile up
+    // on the main queue unboundedly — a runaway memory leak. Keep only the latest
+    // pending snapshot and schedule at most one delivery at a time.
+    private let deliverLock = NSLock()
+    private var pendingSnap: Snapshot?
+    private var deliveryScheduled = false
+
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
@@ -95,8 +103,30 @@ final class DaemonClient: @unchecked Sendable {
               let msg = obj["msg"] as? String, msg == "snapshot"
         else { return }
         guard let snap = try? decoder.decode(Snapshot.self, from: line) else { return }
-        let cb = onSnapshot
-        DispatchQueue.main.async { cb?(snap) }
+        deliverLatest(snap)
+    }
+
+    /// Deliver the newest snapshot to the main thread, coalescing so a slow UI
+    /// can never make the main queue back up with stale snapshots.
+    private func deliverLatest(_ snap: Snapshot) {
+        deliverLock.lock()
+        pendingSnap = snap
+        if deliveryScheduled {
+            deliverLock.unlock()
+            return
+        }
+        deliveryScheduled = true
+        deliverLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.deliverLock.lock()
+            let snap = self.pendingSnap
+            self.pendingSnap = nil
+            self.deliveryScheduled = false
+            self.deliverLock.unlock()
+            if let snap { self.onSnapshot?(snap) }
+        }
     }
 
     /// Fire an action (kill/pause/resume) on a fresh connection.
