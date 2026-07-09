@@ -81,27 +81,39 @@ final class DaemonClient: @unchecked Sendable {
         _ = line.withCString { write(fd, $0, strlen($0)) }
     }
 
+    /// The daemon serializes `ServerMsg` tag-first, so a snapshot line always
+    /// begins with this. A cheap prefix test lets us skip heartbeats/results
+    /// without parsing them, and — crucially — avoids decoding a heartbeat into
+    /// an all-default (empty) Snapshot.
+    private let snapshotPrefix = Array(#"{"msg":"snapshot""#.utf8)
+
     private func readMessages(_ fd: Int32) {
         let cap = 1 << 16
         var buf = [UInt8](repeating: 0, count: cap)
         var acc = Data()
         while true {
-            let n = read(fd, &buf, cap)
-            if n <= 0 { return }
-            acc.append(contentsOf: buf[0..<n])
-            while let nl = acc.firstIndex(of: 0x0A) {
-                let line = acc.subdata(in: acc.startIndex..<nl)
-                acc.removeSubrange(acc.startIndex...nl)
-                handleLine(line)
+            // Drain an autorelease pool every read: this loop never returns, and
+            // JSONDecoder autoreleases large temporaries per 240 KB snapshot — with
+            // no pool they pile up into gigabytes. This is the memory-leak fix.
+            let alive = autoreleasepool { () -> Bool in
+                let n = read(fd, &buf, cap)
+                if n <= 0 { return false }
+                acc.append(contentsOf: buf[0..<n])
+                while let nl = acc.firstIndex(of: 0x0A) {
+                    let line = acc.subdata(in: acc.startIndex..<nl)
+                    acc.removeSubrange(acc.startIndex...nl)
+                    handleLine(line)
+                }
+                return true
             }
+            if !alive { return }
         }
     }
 
     private func handleLine(_ line: Data) {
-        guard !line.isEmpty,
-              let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let msg = obj["msg"] as? String, msg == "snapshot"
-        else { return }
+        // Only snapshots matter; skip heartbeats/action-results with a cheap
+        // prefix check instead of a second full JSON parse (the CPU half).
+        guard line.starts(with: snapshotPrefix) else { return }
         guard let snap = try? decoder.decode(Snapshot.self, from: line) else { return }
         deliverLatest(snap)
     }
