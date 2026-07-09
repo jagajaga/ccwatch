@@ -323,3 +323,80 @@ fn incremental_ingest_accumulates_across_refreshes() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn workflow_fleet_is_grouped_nested_and_activates_the_session() {
+    // A session whose only live work is a background Workflow: its agents live in
+    // subagents/workflows/wf_*/agent-*.jsonl (no launching tool call, meta.json
+    // without a toolUseId). They must be discovered, grouped under one named
+    // Workflow node, and keep the session active — not left invisible/idle.
+    use ccwatch_core::model::AgentState;
+    let now: i64 = 1_800_000_000_000;
+    let root = std::env::temp_dir().join(format!("ccw-engine-wf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pid = std::process::id() as i32;
+    let sid = "sess-wf";
+
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::write(
+        root.join("sessions").join(format!("{pid}.json")),
+        format!(r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/tmp/w","startedAt":{},"name":"parent"}}"#, now - 600_000),
+    )
+    .unwrap();
+
+    // Parent transcript: the Workflow launch (its own node must be suppressed —
+    // the real fleet shows under the synthetic wf_ node). Main convo is old, so
+    // the session is only kept alive by the workflow's burn.
+    let proj = root.join("projects").join("-tmp-w2");
+    std::fs::create_dir_all(&proj).unwrap();
+    let launch = serde_json::json!({
+        "type": "assistant",
+        "timestamp": rfc3339(now - 400_000),
+        "message": {"usage": {"input_tokens": 10, "output_tokens": 20},
+            "content": [{"type": "tool_use", "id": "toolu_wf", "name": "Workflow",
+                         "input": {"script": "..."}}]}
+    });
+    std::fs::write(proj.join(format!("{sid}.jsonl")), format!("{launch}\n")).unwrap();
+
+    // Persisted script → the workflow's display name.
+    let scripts = proj.join(sid).join("workflows").join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(scripts.join("score_v3_holdout-wf_abc.js"), "export const meta={}").unwrap();
+
+    // The fleet: two agents actively burning, each with its own opening prompt.
+    let wf = proj.join(sid).join("subagents").join("workflows").join("wf_abc");
+    std::fs::create_dir_all(&wf).unwrap();
+    for (i, prompt, out) in [(1, "Review scoring holdout split", 3000u64), (2, "Audit label leakage", 4000)] {
+        let user = serde_json::json!({"type":"user","isSidechain":true,
+            "message":{"role":"user","content": prompt}});
+        let gen = serde_json::json!({"type":"assistant","timestamp": rfc3339(now - 20_000),
+            "isSidechain":true,
+            "message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":out}}});
+        std::fs::write(wf.join(format!("agent-a{i}.jsonl")), format!("{user}\n{gen}\n")).unwrap();
+        std::fs::write(wf.join(format!("agent-a{i}.meta.json")), r#"{"agentType":"workflow-subagent","spawnDepth":1}"#).unwrap();
+    }
+
+    let mut engine = Engine::new(Paths::new(&root), Config::default());
+    let snap = engine.refresh(now);
+    let s = &snap.sessions[0];
+
+    // Exactly one Workflow node (the empty launch node is suppressed), named from
+    // the script, with both agents nested under it.
+    let wfs: Vec<_> = s.agents.iter().filter(|a| a.subagent_type == "Workflow").collect();
+    assert_eq!(wfs.len(), 1, "one grouped Workflow node; got {:?}", s.agents.iter().map(|a| &a.subagent_type).collect::<Vec<_>>());
+    let node = wfs[0];
+    assert_eq!(node.description, "score_v3_holdout", "workflow name from script filename");
+    assert_eq!(node.children.len(), 2, "both fleet agents nested");
+    assert!(matches!(node.state, AgentState::Running), "Workflow node runs while its children do");
+    assert!(node.children.iter().all(|c| c.subagent_type == "workflow-subagent"));
+    let descs: Vec<&str> = node.children.iter().map(|c| c.description.as_str()).collect();
+    assert!(descs.contains(&"Review scoring holdout split"), "child desc from its prompt: {descs:?}");
+    assert!(node.children.iter().all(|c| matches!(c.state, AgentState::Running)));
+
+    // The fleet's burn rolls up so the otherwise-parked session reads as ACTIVE.
+    assert_eq!(s.tokens.output, 20 + 3000 + 4000, "session includes fleet burn");
+    assert!(s.tokens_per_min > 0.0, "fleet burn makes the session active");
+    assert!(matches!(s.state, SessionState::Running), "session active via its fleet");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

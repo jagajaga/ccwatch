@@ -25,6 +25,7 @@ IDLE_MS = 120 * 1000        # idle threshold, matches core default
 MAX_TAIL = 16 * 1024 * 1024  # cap transcript read for huge histories
 BUCKET_MS = 5 * 60 * 1000    # governor usage buckets
 HORIZON_MS = 9 * 24 * 3600 * 1000  # ~9 days: covers the weekly window
+WORKFLOW_FRESH_MS = 30 * 60 * 1000  # only recent workflow fleets, matches retention
 
 # bucket_ts -> Opus-equivalent (weighted) billable tokens, fed by every scan.
 # Kept mix-invariant so the governor's learned ceiling survives Fable↔Opus
@@ -445,6 +446,101 @@ def enrich_agents_from_sidechains(sid, transcript_path, agents_list):
     return extra_led, extra_window
 
 
+def workflow_first_prompt(path):
+    """The opening line of a fleet agent's task prompt → its short label."""
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline()
+        c = (json.loads(first).get("message") or {}).get("content")
+        if isinstance(c, str):
+            for ln in c.splitlines():
+                ln = ln.strip()
+                if ln:
+                    return ln[:80] + ("…" if len(ln) > 80 else "")
+    except Exception:
+        pass
+    return "agent"
+
+
+def workflow_label(session_dir, sid, wf_id):
+    """Workflow's human name from its script file `<name>-<wf_id>.js`."""
+    scripts = os.path.join(session_dir, sid, "workflows", "scripts")
+    suffix = "-%s.js" % wf_id
+    try:
+        for name in os.listdir(scripts):
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+    except Exception:
+        pass
+    return "workflow"
+
+
+def collect_workflow_fleets(sid, transcript_path):
+    """Workflow fleets under `<sid>/subagents/workflows/wf_*/agent-*.jsonl`. The
+    Workflow tool spawns these with no launching tool call and a meta.json that
+    lacks a toolUseId, so the normal enrichment misses them. Group each run under
+    one named Workflow node and return (nodes, extra_ledger, extra_window,
+    last_activity) — the burn rolls up so a workflow-only session stays active."""
+    session_dir = os.path.dirname(transcript_path)
+    wf_root = os.path.join(session_dir, sid, "subagents", "workflows")
+    nodes, extra_led, extra_window, fleet_last = [], zero_ledger(), 0.0, None
+    try:
+        wf_ids = [d for d in os.listdir(wf_root)
+                  if d.startswith("wf_") and os.path.isdir(os.path.join(wf_root, d))]
+    except Exception:
+        return nodes, extra_led, extra_window, fleet_last
+    for wf_id in wf_ids:
+        wf_dir = os.path.join(wf_root, wf_id)
+        try:
+            if NOW_MS - int(os.path.getmtime(wf_dir) * 1000) > WORKFLOW_FRESH_MS:
+                continue
+        except Exception:
+            continue
+        children, p_led, p_window, p_last = [], zero_ledger(), 0.0, None
+        for f in sorted(glob.glob(os.path.join(wf_dir, "agent-*.jsonl"))):
+            led, window_billable, last_act, model, activity = scan_sidechain(f)
+            running = last_act is not None and NOW_MS - last_act <= IDLE_MS
+            children.append({
+                "id": "%s/%s" % (wf_id, os.path.basename(f)[:-6]),
+                "subagent_type": "workflow-subagent",
+                "description": workflow_first_prompt(f),
+                "model": model,
+                "state": "running" if running else "finished",
+                "started_at": None,
+                "tokens": led,
+                "tokens_per_min": window_billable / (WINDOW_MS / 60000.0),
+                "activity": activity,
+                "last_activity": last_act,
+                "children": [],
+            })
+            for k in p_led:
+                p_led[k] += led[k]
+            p_window += window_billable
+            if last_act:
+                p_last = max(p_last or 0, last_act)
+        if not children:
+            continue
+        nodes.append({
+            "id": wf_id,
+            "subagent_type": "Workflow",
+            "description": workflow_label(session_dir, sid, wf_id),
+            "model": None,
+            "state": "running" if any(c["state"] == "running" for c in children) else "finished",
+            "started_at": None,
+            "tokens": p_led,
+            "tokens_per_min": p_window / (WINDOW_MS / 60000.0),
+            "activity": [],
+            "last_activity": p_last,
+            "children": children,
+        })
+        for k in extra_led:
+            extra_led[k] += p_led[k]
+        extra_window += p_window
+        if p_last:
+            fleet_last = max(fleet_last or 0, p_last)
+    return nodes, extra_led, extra_window, fleet_last
+
+
 def read_tasks(sid):
     out = []
     files = glob.glob(os.path.join(ROOT, "tasks", sid, "*.json"))
@@ -494,6 +590,19 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
         for k in led:
             led[k] += extra_led[k]
         window_billable += extra_window
+    # Workflow fleets: grouped nodes + rollup. Drop bare Workflow launch nodes
+    # (their fleet shows under the wf_ node), and let fleet burn keep the session
+    # active even when the main conversation is parked waiting on it.
+    if sid in transcripts:
+        wf_nodes, wf_led, wf_window, wf_last = collect_workflow_fleets(sid, transcripts[sid])
+        agents = [a for a in agents
+                  if not (a.get("subagent_type") == "Workflow" and not a.get("children"))]
+        agents.extend(wf_nodes)
+        for k in led:
+            led[k] += wf_led[k]
+        window_billable += wf_window
+        if wf_last:
+            last_act = max(last_act or 0, wf_last)
     tpm = window_billable / (WINDOW_MS / 60000.0)
     last = last_act or meta.get("startedAt")
     if last is None or NOW_MS - last <= IDLE_MS:

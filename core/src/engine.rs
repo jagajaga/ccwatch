@@ -96,12 +96,19 @@ impl AgentAccum {
         let last_act = d.and_then(|d| d.last_activity);
         let recent = last_act.is_some_and(|la| now_ms - la <= stale_ms)
             || self.started_at.is_some_and(|s| now_ms - s <= stale_ms);
+        let children: Vec<Agent> = self
+            .children
+            .iter()
+            .map(|c| c.to_model(data, now_ms, rate_window_secs, stale_ms))
+            .collect();
         // An agent that is *burning tokens right now* is running — even if a
         // (sometimes premature) completion marker was seen; the sidechain keeps
         // generating. Otherwise honor the finish flag, and treat agents with no
         // recent life as finished (guards against completion markers that never
-        // arrive from crashed/ended sessions leaving phantom "running" agents).
-        let running = tokens_per_min > 0.0 || (!self.finished && recent);
+        // arrive from crashed/ended sessions leaving phantom "running" agents). A
+        // grouping node (e.g. a Workflow) is running whenever any child still is.
+        let any_child_running = children.iter().any(|c| matches!(c.state, AgentState::Running));
+        let running = tokens_per_min > 0.0 || (!self.finished && recent) || any_child_running;
         Agent {
             id: self.id.clone(),
             subagent_type: self.subagent_type.clone(),
@@ -117,11 +124,7 @@ impl AgentAccum {
             tokens_per_min,
             activity,
             last_activity: last_act,
-            children: self
-                .children
-                .iter()
-                .map(|c| c.to_model(data, now_ms, rate_window_secs, stale_ms))
-                .collect(),
+            children,
         }
     }
 }
@@ -228,6 +231,51 @@ impl SessionAccum {
         );
     }
 
+    /// Ensure a synthetic `Workflow` parent (id = `wf_…`) exists with the given
+    /// children nested under it. The Workflow tool spawns a fleet whose agents
+    /// have no launching tool call in the main transcript, so we group them here
+    /// under one node — matching Claude's own background-tasks view.
+    fn ensure_workflow(&mut self, wf_id: &str, label: &str, children: &[(String, String)]) {
+        fn find<'a>(agents: &'a mut [AgentAccum], id: &str) -> Option<&'a mut AgentAccum> {
+            for a in agents.iter_mut() {
+                if a.id == id {
+                    return Some(a);
+                }
+                if let Some(f) = find(&mut a.children, id) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        if find(&mut self.agents, wf_id).is_none() {
+            self.agents.push(AgentAccum {
+                id: wf_id.to_string(),
+                subagent_type: "Workflow".to_string(),
+                description: label.to_string(),
+                model: None,
+                started_at: None,
+                finished: false,
+                background: true,
+                children: Vec::new(),
+            });
+        }
+        let parent = find(&mut self.agents, wf_id).expect("just inserted");
+        for (cid, desc) in children {
+            if !parent.children.iter().any(|c| &c.id == cid) {
+                parent.children.push(AgentAccum {
+                    id: cid.clone(),
+                    subagent_type: "workflow-subagent".to_string(),
+                    description: desc.clone(),
+                    model: None,
+                    started_at: None,
+                    finished: false,
+                    background: true,
+                    children: Vec::new(),
+                });
+            }
+        }
+    }
+
     fn prune(&mut self, now_ms: i64, retain_secs: i64) {
         let cutoff = now_ms - retain_secs * 1000;
         while let Some(front) = self.events.front() {
@@ -279,6 +327,9 @@ pub struct Engine {
     last_full_scan: i64,
     /// agent sidechain path -> its meta.json (launching tool_use id, type, desc).
     agent_meta: HashMap<PathBuf, Option<SidechainMeta>>,
+    /// workflow-agent sidechain path -> its resolved description (first prompt).
+    /// Cached so we read each fleet agent's opening line only once.
+    wf_child_desc: HashMap<PathBuf, String>,
     /// Parsed limit-hit markers (session + weekly), pruned to ~2 weeks.
     limit_hits: Vec<crate::model::LimitHit>,
     /// Latest usage-% banners Claude Code printed, per period.
@@ -299,6 +350,7 @@ impl Engine {
             last_ended_scan: -1,
             last_full_scan: -1,
             agent_meta: HashMap::new(),
+            wf_child_desc: HashMap::new(),
             limit_hits: Vec::new(),
             weekly_usage: None,
             window_usage: None,
@@ -491,10 +543,13 @@ impl Engine {
             };
 
             // Agents (clone tree into model form, enriched from sidechains).
+            // Drop bare `Workflow` launch nodes with no fleet of their own — the
+            // real fleet is shown under the synthetic `wf_…` node instead.
             let agents: Vec<Agent> = accum
                 .agents
                 .iter()
                 .map(|a| a.to_model(&accum.agent_data, now_ms, self.config.rate_window_secs, AGENT_STALE_MS))
+                .filter(|a| !(a.subagent_type == "Workflow" && a.children.is_empty()))
                 .collect();
             let agent_starts_in_window = count_recent_agent_starts(
                 &accum.agents,
@@ -953,74 +1008,199 @@ impl Engine {
                 continue;
             };
             let tool_use_id = meta.tool_use_id.clone();
+            self.accums
+                .entry(sid.to_string())
+                .or_default()
+                .ensure_agent(&tool_use_id, &meta.agent_type, &meta.description);
+            self.ingest_sidechain_events(sid, &path, &tool_use_id);
+        }
+        // Workflow fleets live one level deeper and have no launching tool call.
+        self.ingest_workflow_dirs(sid, dir);
+    }
 
-            let watermark = *self.watermarks.get(&path).unwrap_or(&0);
-            let Some((lines, new_watermark)) = read_new_lines(&path, watermark) else {
-                continue;
-            };
-            self.watermarks.insert(path, new_watermark);
-            if lines.is_empty() {
-                continue;
-            }
-
-            let accum = self.accums.entry(sid.to_string()).or_default();
-            // Make sure this subagent is visible even if we never saw its launch.
-            accum.ensure_agent(&tool_use_id, &meta.agent_type, &meta.description);
-            for line in lines {
-                for ev in transcripts::parse_line(&line) {
-                    match ev {
-                        TranscriptEvent::Assistant { ts_ms, model, usage, .. } => {
-                            let data = accum.agent_data.entry(tool_use_id.clone()).or_default();
-                            data.ledger.add(&usage);
-                            if let Some(m) = model {
-                                if !m.starts_with('<') {
-                                    data.model = Some(m);
-                                }
-                            }
-                            if let Some(ts) = ts_ms {
-                                data.last_activity =
-                                    Some(ts.max(data.last_activity.unwrap_or(0)));
-                                let tier = crate::config::tier_of(data.model.as_deref());
-                                let te = TokenEvent {
-                                    ts_ms: ts,
-                                    total: usage.billable(),
-                                    work: usage.input + usage.output,
-                                    input: usage.input,
-                                    cache_read: usage.cache_read,
-                                    tier,
-                                    weight: self.config.weight_for(tier),
-                                };
-                                data.events.push_back(te);
-                                // Roll up into the parent session: subagent
-                                // burn drains the same account.
-                                accum.ledger.add(&usage);
-                                accum.events.push_back(te);
-                                accum.last_activity =
-                                    Some(ts.max(accum.last_activity.unwrap_or(0)));
+    /// Read new lines from one subagent sidechain and fold them into the session
+    /// accum under `agent_id`: its own ledger/rate/activity, plus a rollup into
+    /// the session (subagent burn drains the same account, and keeps the session
+    /// reading as active while its fleet works).
+    fn ingest_sidechain_events(&mut self, sid: &str, path: &std::path::Path, agent_id: &str) {
+        let watermark = *self.watermarks.get(path).unwrap_or(&0);
+        let Some((lines, new_watermark)) = read_new_lines(path, watermark) else {
+            return;
+        };
+        self.watermarks.insert(path.to_path_buf(), new_watermark);
+        if lines.is_empty() {
+            return;
+        }
+        let accum = self.accums.entry(sid.to_string()).or_default();
+        for line in lines {
+            for ev in transcripts::parse_line(&line) {
+                match ev {
+                    TranscriptEvent::Assistant { ts_ms, model, usage, .. } => {
+                        let data = accum.agent_data.entry(agent_id.to_string()).or_default();
+                        data.ledger.add(&usage);
+                        if let Some(m) = model {
+                            if !m.starts_with('<') {
+                                data.model = Some(m);
                             }
                         }
-                        TranscriptEvent::ToolStart { id, name, detail, ts_ms: Some(ts) } => {
-                            accum
-                                .agent_data
-                                .entry(tool_use_id.clone())
-                                .or_default()
-                                .pending
-                                .insert(id, (name, detail, ts));
+                        if let Some(ts) = ts_ms {
+                            data.last_activity = Some(ts.max(data.last_activity.unwrap_or(0)));
+                            let tier = crate::config::tier_of(data.model.as_deref());
+                            let te = TokenEvent {
+                                ts_ms: ts,
+                                total: usage.billable(),
+                                work: usage.input + usage.output,
+                                input: usage.input,
+                                cache_read: usage.cache_read,
+                                tier,
+                                weight: self.config.weight_for(tier),
+                            };
+                            data.events.push_back(te);
+                            accum.ledger.add(&usage);
+                            accum.events.push_back(te);
+                            accum.last_activity = Some(ts.max(accum.last_activity.unwrap_or(0)));
                         }
-                        TranscriptEvent::ToolResult { tool_use_id: rid, .. } => {
-                            if let Some(data) = accum.agent_data.get_mut(&tool_use_id) {
-                                data.pending.remove(&rid);
-                            }
-                        }
-                        TranscriptEvent::RateLimited { ts_ms: Some(ts) } => {
-                            self.rate_limits.push_back(ts);
-                        }
-                        _ => {}
                     }
+                    TranscriptEvent::ToolStart { id, name, detail, ts_ms: Some(ts) } => {
+                        accum
+                            .agent_data
+                            .entry(agent_id.to_string())
+                            .or_default()
+                            .pending
+                            .insert(id, (name, detail, ts));
+                    }
+                    TranscriptEvent::ToolResult { tool_use_id: rid, .. } => {
+                        if let Some(data) = accum.agent_data.get_mut(agent_id) {
+                            data.pending.remove(&rid);
+                        }
+                    }
+                    TranscriptEvent::RateLimited { ts_ms: Some(ts) } => {
+                        self.rate_limits.push_back(ts);
+                    }
+                    _ => {}
                 }
             }
         }
     }
+
+    /// Discover and ingest Workflow fleets: `<subagents>/workflows/wf_*/agent-*.jsonl`.
+    /// Each run becomes one synthetic `Workflow` node with its agents nested,
+    /// their burn rolled into the session. Without this, a workflow's agents are
+    /// invisible and a session that's only running one reads as idle.
+    fn ingest_workflow_dirs(&mut self, sid: &str, subagents_dir: &std::path::Path) {
+        let wf_root = subagents_dir.join("workflows");
+        let Ok(dirs) = std::fs::read_dir(&wf_root) else {
+            return;
+        };
+        let retain_secs = self.config.retention_secs() as u64;
+        for d in dirs.flatten() {
+            let wf_dir = d.path();
+            if !wf_dir.is_dir() {
+                continue;
+            }
+            let recent = std::fs::metadata(&wf_dir)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|age| age.as_secs() <= retain_secs)
+                .unwrap_or(false);
+            if !recent {
+                continue;
+            }
+            let Some(wf_id) = wf_dir.file_name().and_then(|n| n.to_str()).map(String::from) else {
+                continue;
+            };
+            let label = self.workflow_label(subagents_dir, &wf_id);
+            let Ok(files) = std::fs::read_dir(&wf_dir) else {
+                continue;
+            };
+            let mut children: Vec<(String, String)> = Vec::new();
+            for f in files.flatten() {
+                let p = f.path();
+                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if !stem.starts_with("agent-")
+                    || p.extension().and_then(|e| e.to_str()) != Some("jsonl")
+                {
+                    continue;
+                }
+                let child_id = format!("{wf_id}/{stem}");
+                let desc = self.workflow_child_desc(&p);
+                self.ingest_sidechain_events(sid, &p, &child_id);
+                children.push((child_id, desc));
+            }
+            if children.is_empty() {
+                continue;
+            }
+            self.accums
+                .entry(sid.to_string())
+                .or_default()
+                .ensure_workflow(&wf_id, &label, &children);
+        }
+    }
+
+    /// The workflow's human name, from its persisted script filename
+    /// `workflows/scripts/<name>-<wf_id>.js`. Falls back to "workflow".
+    fn workflow_label(&self, subagents_dir: &std::path::Path, wf_id: &str) -> String {
+        let Some(parent) = subagents_dir.parent() else {
+            return "workflow".to_string();
+        };
+        let suffix = format!("-{wf_id}.js");
+        if let Ok(rd) = std::fs::read_dir(parent.join("workflows").join("scripts")) {
+            for e in rd.flatten() {
+                if let Some(stripped) = e
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.strip_suffix(&suffix))
+                {
+                    return stripped.to_string();
+                }
+            }
+        }
+        "workflow".to_string()
+    }
+
+    /// A short label for one workflow agent — the opening line of its task
+    /// prompt. Resolved once per file and cached.
+    fn workflow_child_desc(&mut self, path: &std::path::Path) -> String {
+        if let Some(d) = self.wf_child_desc.get(path) {
+            return d.clone();
+        }
+        let desc = first_prompt_summary(path);
+        self.wf_child_desc.insert(path.to_path_buf(), desc.clone());
+        desc
+    }
+}
+
+/// First line of a subagent transcript → a short one-line task summary.
+fn first_prompt_summary(path: &std::path::Path) -> String {
+    use std::io::BufRead;
+    let fallback = || "agent".to_string();
+    let Ok(file) = std::fs::File::open(path) else {
+        return fallback();
+    };
+    let mut first = String::new();
+    if std::io::BufReader::new(file).read_line(&mut first).is_err() || first.is_empty() {
+        return fallback();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&first) else {
+        return fallback();
+    };
+    let text = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.is_empty() {
+        return fallback();
+    }
+    let mut s: String = line.chars().take(80).collect();
+    if line.chars().count() > 80 {
+        s.push('…');
+    }
+    s
 }
 
 /// Scalar inputs to leak detection, snapshotted to avoid borrow conflicts.

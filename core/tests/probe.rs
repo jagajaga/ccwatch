@@ -236,3 +236,62 @@ fn probe_emits_valid_snapshot() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn probe_groups_workflow_fleet_and_activates_session() {
+    // Same contract as the engine: a session whose only live work is a Workflow
+    // must show its fleet grouped under one named node and read as active.
+    use ccwatch_core::model::AgentState;
+    let root = std::env::temp_dir().join(format!("ccw-probe-wf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pid = std::process::id() as i32;
+    let sid = "probe-wf";
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::write(
+        root.join("sessions").join(format!("{pid}.json")),
+        format!(r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/r/p","kind":"interactive","entrypoint":"cli","version":"2.1.0","name":"probed","startedAt":{}}}"#, now_ms - 600_000),
+    ).unwrap();
+
+    let proj = root.join("projects").join("-r-wf");
+    std::fs::create_dir_all(&proj).unwrap();
+    // Old main convo + a Workflow launch (its bare node must be suppressed).
+    let launch = serde_json::json!({
+        "type": "assistant", "timestamp": rfc3339(now_ms - 400_000),
+        "message": {"content": [{"type": "tool_use", "id": "toolu_wf", "name": "Workflow", "input": {"script": "..."}}]}
+    });
+    std::fs::write(proj.join(format!("{sid}.jsonl")), format!("{launch}\n")).unwrap();
+
+    let scripts = proj.join(sid).join("workflows").join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(scripts.join("score_v3_holdout-wf_abc.js"), "x").unwrap();
+
+    let wf = proj.join(sid).join("subagents").join("workflows").join("wf_abc");
+    std::fs::create_dir_all(&wf).unwrap();
+    for (i, prompt, out) in [(1, "Review scoring holdout split", 3000u64), (2, "Audit label leakage", 4000)] {
+        let user = serde_json::json!({"type":"user","isSidechain":true,"message":{"role":"user","content":prompt}});
+        let gen = serde_json::json!({"type":"assistant","timestamp":rfc3339(now_ms - 20_000),"isSidechain":true,
+            "message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":out}}});
+        std::fs::write(wf.join(format!("agent-a{i}.jsonl")), format!("{user}\n{gen}\n")).unwrap();
+        std::fs::write(wf.join(format!("agent-a{i}.meta.json")), r#"{"agentType":"workflow-subagent","spawnDepth":1}"#).unwrap();
+    }
+
+    let argv: Vec<String> = vec!["python3".into(), "-".into(), root.to_str().unwrap().into()];
+    let out = SystemRunner.run(&argv, Some(PROBE_PY), Duration::from_secs(15)).expect("probe should run");
+    let snap: Snapshot = serde_json::from_str(out.trim()).expect("probe output must parse");
+    let s = &snap.sessions[0];
+
+    let wfs: Vec<_> = s.agents.iter().filter(|a| a.subagent_type == "Workflow").collect();
+    assert_eq!(wfs.len(), 1, "one grouped Workflow node; agents: {:?}", s.agents.iter().map(|a| &a.subagent_type).collect::<Vec<_>>());
+    let node = wfs[0];
+    assert_eq!(node.description, "score_v3_holdout");
+    assert_eq!(node.children.len(), 2);
+    assert!(matches!(node.state, AgentState::Running));
+    assert!(node.children.iter().all(|c| c.subagent_type == "workflow-subagent"));
+    assert!(node.children.iter().any(|c| c.description == "Review scoring holdout split"));
+    assert!(s.tokens.output >= 7000, "fleet burn rolled into the session");
+    assert!(matches!(s.state, SessionState::Running), "workflow keeps the session active");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
