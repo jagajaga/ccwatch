@@ -285,6 +285,7 @@ pub fn merge(local: Snapshot, remotes: &[Snapshot]) -> Snapshot {
         weekly_usage_pct,
         window_usage_pct,
         governor: None,
+        pacing: None,
     }
 }
 

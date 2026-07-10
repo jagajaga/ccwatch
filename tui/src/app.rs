@@ -614,6 +614,7 @@ pub(crate) mod test_support {
             weekly_usage_pct: None,
             window_usage_pct: None,
             governor: None,
+            pacing: None,
         }
     }
 }

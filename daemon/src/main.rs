@@ -135,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         let remote_errors = manager.errors();
         let learned_path = paths.ccwatch_dir().join("learned.json");
         let mut learned = load_learned(&learned_path);
+        let mut pacer_state = ccwatch_core::pacer::PacerState { price: 0.0 };
         let live_usage = live_usage.clone();
         let mut build = move |engine: &mut Engine| {
             let local = engine.refresh_now();
@@ -199,6 +200,17 @@ fn main() -> anyhow::Result<()> {
                 snap.alerts.push(alert);
             }
             snap.governor = Some(g);
+
+            let saw_429 = false; // Step 1: no 429 threading yet; Autonomous step wires this.
+            let (plan, next_state) = ccwatch_core::pacer::plan(
+                &snap,
+                &config.pacer_config(),
+                pacer_state,
+                snap.generated_at,
+                saw_429,
+            );
+            pacer_state = next_state;
+            snap.pacing = Some(plan);
             snap
         };
         let engine_config = Config::load(&paths.config_file());
@@ -485,5 +497,23 @@ mod tests {
         assert_eq!((l.tokens, l.hard, l.at_ms), (12_000_000, true, 5));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use ccwatch_core::model::Snapshot;
+    use ccwatch_core::pacer::{PacerConfig, PacerState};
+
+    #[test]
+    fn plan_attached_when_governor_present_is_computed() {
+        // A snapshot with no governor yields a None-ish plan but must not panic,
+        // and state price is carried through.
+        let snap = Snapshot::empty(1_000);
+        let (planr, st) = ccwatch_core::pacer::plan(
+            &snap, &PacerConfig::default(), PacerState { price: 0.5 }, 1_000, false,
+        );
+        assert_eq!(st.price, 0.5, "price carried through when no governor");
+        assert!(planr.actions.is_empty());
     }
 }

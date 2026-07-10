@@ -466,6 +466,9 @@ pub struct Snapshot {
     /// Fuel-gauge readouts; computed by the daemon after merging all hosts.
     #[serde(default)]
     pub governor: Option<GovernorStatus>,
+    /// Cruise Control's advisory plan for this snapshot (compute-only in Step 1).
+    #[serde(default)]
+    pub pacing: Option<PacingPlan>,
 }
 
 /// A live usage-% reading straight from Claude Code's banner.
@@ -501,6 +504,7 @@ impl Snapshot {
             weekly_usage_pct: None,
             window_usage_pct: None,
             governor: None,
+            pacing: None,
         }
     }
 }

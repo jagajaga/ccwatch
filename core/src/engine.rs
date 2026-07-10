@@ -690,6 +690,7 @@ impl Engine {
             window_usage_pct: self.window_usage,
             model_mix,
             governor: None,
+            pacing: None,
         }
     }
 
