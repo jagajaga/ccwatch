@@ -12,7 +12,7 @@ mod usage_bridge;
 
 use ccwatch_core::actions::{self, ActionOutcome};
 use ccwatch_core::ipc::{ActionRequest, ClientMsg, ServerMsg};
-use ccwatch_core::model::{PaceTarget, Snapshot};
+use ccwatch_core::model::{PaceTarget, Priority, Snapshot};
 use ccwatch_core::remote::{self, RemoteDef, SystemRunner};
 use ccwatch_core::{Config, Engine, Paths};
 use remotes::RemoteManager;
@@ -41,6 +41,10 @@ type SharedSnapshot = Arc<RwLock<Arc<Snapshot>>>;
 struct CruiseRuntime {
     mode: String, // "off" | "advisory" | "oneclick" | "auto"
     paced: std::collections::HashSet<PaceTarget>,
+    /// User's per-session priority overrides, keyed by stable session id. Only
+    /// High/Low are stored (Normal = no override). Stamped onto each snapshot's
+    /// sessions and persisted so pins survive restarts.
+    overrides: std::collections::HashMap<String, Priority>,
     #[allow(dead_code)]
     last_log: Option<String>,
 }
@@ -77,6 +81,26 @@ fn do_alive(t: &PaceTarget) -> bool {
 /// orphans a crashed daemon left stopped) and rewritten whenever `paced` changes.
 fn cruise_paced_file(paths: &Paths) -> std::path::PathBuf {
     paths.ccwatch_dir().join("cruise-paced.json")
+}
+
+/// Path of the persisted per-session priority overrides (session id → tier).
+fn cruise_priority_file(paths: &Paths) -> std::path::PathBuf {
+    paths.ccwatch_dir().join("cruise-priority.json")
+}
+
+/// Persist the priority-override map (best-effort) so pins survive a restart.
+fn persist_overrides(paths: &Paths, overrides: &std::collections::HashMap<String, Priority>) {
+    if let Ok(json) = serde_json::to_string(overrides) {
+        let _ = std::fs::write(cruise_priority_file(paths), json);
+    }
+}
+
+/// Load the persisted priority-override map on startup (empty if absent/corrupt).
+fn load_overrides(paths: &Paths) -> std::collections::HashMap<String, Priority> {
+    std::fs::read_to_string(cruise_priority_file(paths))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
 }
 
 /// Persist the current `paced` set (best-effort; errors ignored). Called whenever
@@ -163,6 +187,7 @@ fn main() -> anyhow::Result<()> {
         // Normalize the same way `SetCruiseMode` does, so `cruise_mode = "Auto"`
         // in config.toml engages auto instead of silently acting as off.
         mode: cruise_config.cruise_mode.trim().to_lowercase(),
+        overrides: load_overrides(&paths),
         ..Default::default()
     }));
 
@@ -313,6 +338,18 @@ fn main() -> anyhow::Result<()> {
                 snap.alerts.push(alert);
             }
             snap.governor = Some(g);
+
+            // Stamp the user's per-session priority overrides onto the snapshot
+            // (keyed by stable session id) BEFORE the pacer reads them, so a pinned
+            // High is protected and a pinned Low sheds first.
+            {
+                let c = cruise.lock().unwrap();
+                if !c.overrides.is_empty() {
+                    for s in &mut snap.sessions {
+                        s.priority_override = c.overrides.get(&s.id).copied();
+                    }
+                }
+            }
 
             // A fresh 429 within the last ~2 min is a hard AIMD signal; `rate_limits`
             // is the governor's own list of 429 epoch-ms timestamps, already in scope.
@@ -586,6 +623,24 @@ fn execute_action(
             }
             persist_paced(paths, &c.paced);
             ActionOutcome::Ok(format!("Cruise mode = {mode}; released {released}"))
+        }
+        ActionRequest::SetSessionPriority { session_id, priority } => {
+            let mut c = cruise.lock().unwrap();
+            let tier = match priority.trim().to_lowercase().as_str() {
+                "high" => Some(Priority::High),
+                "low" => Some(Priority::Low),
+                _ => None, // "normal"/anything else clears the override
+            };
+            match tier {
+                Some(p) => {
+                    c.overrides.insert(session_id.clone(), p);
+                }
+                None => {
+                    c.overrides.remove(session_id);
+                }
+            }
+            persist_overrides(paths, &c.overrides);
+            ActionOutcome::Ok(format!("Cruise priority: {session_id} = {priority}"))
         }
     }
 }

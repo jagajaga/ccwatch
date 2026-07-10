@@ -138,6 +138,8 @@ fn daemon_merges_remote_and_cancels() {
         state: SessionState::Running,
         started_at: Some(0),
         last_activity: Some(0),
+        last_user_turn: None,
+        priority_override: None,
         tokens: TokenLedger { input: 1, output: 2, ..Default::default() },
         tokens_per_min: 1234.0,
         cpu_pct: 0.0,

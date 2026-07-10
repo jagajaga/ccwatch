@@ -624,6 +624,8 @@ impl Engine {
                 state,
                 started_at: meta.started_at,
                 last_activity,
+                last_user_turn: leak_inputs.last_user_turn,
+                priority_override: None, // stamped by the daemon from its override map
                 tokens: ledger,
                 tokens_per_min,
                 cpu_pct: stat.cpu_pct,

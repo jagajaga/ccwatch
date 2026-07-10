@@ -31,6 +31,9 @@ pub enum ActionRequest {
     /// Set Cruise Control mode at runtime: "off" | "advisory" | "oneclick" | "auto".
     /// Any non-"auto" value releases everything Cruise paused.
     SetCruiseMode { mode: String },
+    /// Set a per-session Cruise priority override, keyed by the stable session id:
+    /// "high" (never pause) | "low" (shed first) | "normal" (clear the override).
+    SetSessionPriority { session_id: String, priority: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -347,6 +347,8 @@ mod tests {
             state: SessionState::Running,
             started_at: Some(0),
             last_activity: Some(0),
+            last_user_turn: None,
+            priority_override: None,
             tokens: TokenLedger {
                 input: 100,
                 output: 200,

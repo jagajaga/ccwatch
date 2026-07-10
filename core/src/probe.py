@@ -233,6 +233,7 @@ def scan_transcript(path):
     led = zero_ledger()
     window_billable = 0
     last_act = None
+    last_user = None  # last real user turn (human message), distinct from last_act
     model = None
     titles = {"ai": None, "custom": None}
     agents = {}  # tool_use id -> agent dict, insertion-ordered
@@ -259,6 +260,19 @@ def scan_transcript(path):
             note_limit_marker(d, ts)
             m = d.get("message") or {}
             content = m.get("content")
+            # Last real USER turn: a user-type line with text and no tool_result
+            # carrier (mirrors the Rust transcript parser). Distinct from
+            # last_activity — the session's own output bumps that, not this — so it
+            # drives Cruise's foreground protection.
+            if d.get("type") == "user" and ts and not d.get("sourceToolUseID"):
+                if isinstance(content, str):
+                    if content.strip():
+                        last_user = max(last_user or 0, ts)
+                elif isinstance(content, list):
+                    has_text = any(isinstance(b, dict) and b.get("type") == "text" for b in content)
+                    has_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+                    if has_text and not has_result:
+                        last_user = max(last_user or 0, ts)
             # Agent lifecycle: launches in assistant turns, completions via
             # tool_result carriers.
             if isinstance(content, list):
@@ -345,7 +359,7 @@ def scan_transcript(path):
         if NOW_MS - ts < 30 * 60 * 1000
     ][:6]
     title = titles["custom"] or titles["ai"]
-    return led, window_billable, last_act, model, list(agents.values()), activity, title
+    return led, window_billable, last_act, model, list(agents.values()), activity, title, last_user
 
 
 def scan_sidechain(path):
@@ -576,10 +590,10 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
     if not sid or not pid or not alive(pid):
         continue
 
-    led, window_billable, last_act, model, agents, activity, title = (
+    led, window_billable, last_act, model, agents, activity, title, last_user = (
         scan_transcript(transcripts[sid])
         if sid in transcripts
-        else (zero_ledger(), 0, None, None, [], [], None)
+        else (zero_ledger(), 0, None, None, [], [], None, None)
     )
     # Subagent sidechains: enrich agent entries and roll their burn up into
     # the parent session — it drains the same account.
@@ -626,6 +640,7 @@ for f in sorted(glob.glob(os.path.join(ROOT, "sessions", "*.json"))):
         "state": state,
         "started_at": meta.get("startedAt"),
         "last_activity": last,
+        "last_user_turn": last_user,
         "tokens": led,
         "tokens_per_min": tpm,
         "cpu_pct": cpu,

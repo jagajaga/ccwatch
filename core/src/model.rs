@@ -105,9 +105,13 @@ pub enum AgentState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
+    /// Protected: never paused. Auto for the actively-used session (recent user
+    /// turn), or pinned by the user.
     High,
+    /// Default: Cruise's to decide via the value-density knapsack.
     Normal,
-    Background,
+    /// User-pinned "shed these first": paused before any Normal session.
+    Low,
 }
 
 /// Identifies a process Cruise can actuate. `ssh: None` is a local pid (acted on
@@ -441,6 +445,17 @@ pub struct Session {
     pub state: SessionState,
     pub started_at: Option<i64>,
     pub last_activity: Option<i64>,
+    /// Timestamp of the last real user turn (a human message), distinct from
+    /// `last_activity` — which the session's own token output also bumps. Drives
+    /// Cruise's automatic foreground protection: only a session you actually typed
+    /// in recently is auto-`High`.
+    #[serde(default)]
+    pub last_user_turn: Option<i64>,
+    /// The user's per-session Cruise priority override (`High` = never pause,
+    /// `Low` = shed first). `None` = use the auto tier. Stamped by the daemon from
+    /// its persisted override map.
+    #[serde(default)]
+    pub priority_override: Option<Priority>,
     pub tokens: TokenLedger,
     pub tokens_per_min: f64,
     pub cpu_pct: f32,

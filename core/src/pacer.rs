@@ -6,28 +6,28 @@
 use std::collections::HashSet;
 use crate::model::{Agent, Host, PaceAction, PaceTarget, PacingPlan, Priority, Session, Snapshot};
 
-/// Interactive entrypoints. A session on one of these, with a recent user turn,
-/// is the foreground and is exempt.
-const INTERACTIVE: [&str; 3] = ["claude-desktop", "claude-vscode", "cli"];
-
-/// Infer a session's tier. Foreground (interactive entrypoint + a user turn
-/// within `idle_secs`) is `High`; loops/workflows/remote or interactive-but-idle
-/// sessions are `Background`; everything else is `Normal`.
-pub fn priority_of(
-    entrypoint: &str,
-    last_user_turn: Option<i64>,
-    now_ms: i64,
-    idle_secs: i64,
-) -> Priority {
-    let interactive = INTERACTIVE.contains(&entrypoint);
+/// The automatic tier, judged purely by a real **user turn**: a session you
+/// actually typed in within `idle_secs` is the foreground → `High` (protected);
+/// everything else defaults to `Normal` (Cruise's to decide). Note this keys off
+/// the *user* turn, not `last_activity` — a session grinding autonomously bumps
+/// its activity every second but has no recent user turn, so it is correctly
+/// `Normal`, not self-protecting.
+pub fn auto_priority(last_user_turn: Option<i64>, now_ms: i64, idle_secs: i64) -> Priority {
     let user_recent = last_user_turn.is_some_and(|t| now_ms - t <= idle_secs * 1000);
-    if interactive && user_recent {
+    if user_recent {
         Priority::High
-    } else if !interactive || !user_recent {
-        Priority::Background
     } else {
         Priority::Normal
     }
+}
+
+/// A session's **effective** tier: the user's per-session override if they set one
+/// (`High` = never pause, `Low` = shed first), else the auto tier. The override
+/// always wins — pinning `Low` on the session you're typing in makes it pausable;
+/// pinning `High` on a background one protects it.
+pub fn effective_priority(s: &Session, now_ms: i64, idle_secs: i64) -> Priority {
+    s.priority_override
+        .unwrap_or_else(|| auto_priority(s.last_user_turn, now_ms, idle_secs))
 }
 
 /// Billable tok/min that spends `remaining - reserve` evenly until the deadline.
@@ -99,6 +99,8 @@ struct Candidate {
     label: String,
     burn: f64,
     is_fleet: bool,
+    /// User-pinned `Low` — a strict tier shed before any `Normal` session.
+    is_low: bool,
 }
 
 /// `(true, "fleet <name> (N agents)")` if the session's live work is a Workflow
@@ -245,8 +247,7 @@ pub fn plan(
         .filter(|s| {
             s.tokens_per_min > 0.0
                 && !matches!(s.host, Host::Cloud)
-                && priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
-                    == Priority::Background
+                && effective_priority(s, now_ms, cfg.idle_secs) != Priority::High
         })
         .filter_map(|s| {
             let pid = s.pid?;
@@ -254,24 +255,26 @@ pub fn plan(
                 Host::Remote { ssh_target, .. } => Some(ssh_target.clone()),
                 _ => None,
             };
+            let is_low = effective_priority(s, now_ms, cfg.idle_secs) == Priority::Low;
             let (is_fleet, label) = fleet_label(s);
-            Some(Candidate { pid, ssh, label, burn: s.tokens_per_min, is_fleet })
+            Some(Candidate { pid, ssh, label, burn: s.tokens_per_min, is_fleet, is_low })
         })
         .collect();
 
-    // Greedy value-density knapsack, tiered: fleets are a strict harm-tier and
-    // always shed before non-fleet Background (pausing autonomous, unwatched work
-    // is low-harm — a barely-burning fleet still goes before a heavy loop). Within
-    // a tier, pause the lowest value-density (`weight/burn`) first. Only act when
-    // over target by more than the dead-band (anti-flap). `price` = the
-    // value-density at the cut (λ).
+    // Greedy value-density knapsack, tiered. Strict harm-tiers shed in order:
+    // (1) user-pinned `Low` first, then (2) `Normal` fleets (autonomous, unwatched
+    // work — a barely-burning fleet still goes before a heavy loop), then (3)
+    // `Normal` non-fleets. Within a tier, pause the lowest value-density
+    // (`weight/burn`) first. Only act when over target by more than the dead-band
+    // (anti-flap). `price` = the value-density at the cut (λ).
     let over = target > 0.0 && actual > target * (1.0 + cfg.dead_band);
     let mut actions = Vec::new();
     let mut price = 0.0;
     if over {
         candidates.sort_by(|a, b| {
-            b.is_fleet
-                .cmp(&a.is_fleet) // fleets (true) before non-fleets
+            b.is_low
+                .cmp(&a.is_low) // Low (true) shed before Normal
+                .then(b.is_fleet.cmp(&a.is_fleet)) // then fleets before non-fleets
                 .then(density(a).partial_cmp(&density(b)).unwrap_or(std::cmp::Ordering::Equal))
         });
         let mut projected = actual;
@@ -378,25 +381,34 @@ mod tests {
     }
 
     #[test]
-    fn interactive_with_recent_user_turn_is_high() {
+    fn recent_user_turn_is_high_else_normal() {
         let now = 1_000_000_000;
-        // claude-vscode, user typed 10s ago → foreground → High/exempt.
-        assert_eq!(priority_of("claude-vscode", Some(now - 10_000), now, 120), Priority::High);
+        // Typed 10s ago → foreground → High/exempt.
+        assert_eq!(auto_priority(Some(now - 10_000), now, 120), Priority::High);
+        // No user turn for 10 min → the "started it and walked away" case → Normal
+        // (pausable), even though the session may be burning hard right now.
+        assert_eq!(auto_priority(Some(now - 600_000), now, 120), Priority::Normal);
+        // Never a user turn (headless / workflow) → Normal.
+        assert_eq!(auto_priority(None, now, 120), Priority::Normal);
     }
 
     #[test]
-    fn loop_and_workflow_entrypoints_are_background() {
+    fn override_wins_over_auto_tier() {
         let now = 1_000_000_000;
-        assert_eq!(priority_of("loop", Some(now - 10_000), now, 120), Priority::Background);
-        assert_eq!(priority_of("workflow", None, now, 120), Priority::Background);
-    }
-
-    #[test]
-    fn interactive_but_idle_of_user_is_background() {
-        let now = 1_000_000_000;
-        // Interactive entrypoint but no user turn for 10 min → the "at lunch"
-        // case → Background.
-        assert_eq!(priority_of("claude-desktop", Some(now - 600_000), now, 120), Priority::Background);
+        // Pinning Low on the session you're actively typing in makes it pausable.
+        let mut active = Session::default_for_test();
+        active.last_user_turn = Some(now - 5_000); // auto would be High
+        active.priority_override = Some(Priority::Low);
+        assert_eq!(effective_priority(&active, now, 120), Priority::Low);
+        // Pinning High on an idle/background session protects it.
+        let mut background = Session::default_for_test();
+        background.last_user_turn = None; // auto would be Normal
+        background.priority_override = Some(Priority::High);
+        assert_eq!(effective_priority(&background, now, 120), Priority::High);
+        // No override → falls back to the auto tier.
+        let mut plain = Session::default_for_test();
+        plain.last_user_turn = None;
+        assert_eq!(effective_priority(&plain, now, 120), Priority::Normal);
     }
 
     #[test]
@@ -485,18 +497,22 @@ mod tests {
         }
     }
 
-    fn sess(name: &str, pid: i32, entry: &str, last_user_ms: i64, tpm: f64) -> Session {
+    /// `last_user` is the last real USER turn: `Some(recent)` → foreground/High,
+    /// `None` → no user turn → Normal (a pausable candidate). The entrypoint no
+    /// longer affects the tier; it's kept only for labeling.
+    fn sess(name: &str, pid: i32, entry: &str, last_user: Option<i64>, tpm: f64) -> Session {
         let mut s = Session::default_for_test(); // helper added below
         s.name = name.into();
         s.pid = Some(pid);
         s.entrypoint = entry.into();
-        s.last_activity = Some(last_user_ms);
+        s.last_user_turn = last_user;
         s.tokens_per_min = tpm;
         s
     }
 
-    fn fleet_sess(name: &str, pid: i32, wf_name: &str, n: usize, now: i64, tpm: f64) -> Session {
-        let mut s = sess(name, pid, "workflow", now - 5_000, tpm);
+    fn fleet_sess(name: &str, pid: i32, wf_name: &str, n: usize, _now: i64, tpm: f64) -> Session {
+        // A fleet/workflow session has no human at the keyboard → no user turn.
+        let mut s = sess(name, pid, "workflow", None, tpm);
         // One `Workflow` node with `n` child agents. If `Agent`'s fields differ,
         // the serde error names the mismatch — adjust the JSON to match.
         let child = serde_json::json!({
@@ -524,8 +540,8 @@ mod tests {
         let mut snap = Snapshot::empty(now);
         snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
         snap.sessions = vec![
-            sess("foreground", 10, "claude-vscode", now - 5_000, 200_000.0),
-            sess("loopA", 20, "loop", now - 5_000, 300_000.0),          // biggest burner
+            sess("foreground", 10, "claude-vscode", Some(now - 5_000), 200_000.0),
+            sess("loopA", 20, "loop", None, 300_000.0),          // biggest burner
             fleet_sess("workflowB", 30, "score_v3", 52, now, 100_000.0), // smaller, but a fleet
         ];
         let (planr, state) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
@@ -561,7 +577,7 @@ mod tests {
         snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
         snap.sessions = vec![
             fleet_sess("fleetX", 40, "wf", 3, now, 10_000.0),   // tiny burn, but a fleet
-            sess("loopBig", 50, "loop", now - 5_000, 50_000.0), // heavier non-fleet
+            sess("loopBig", 50, "loop", None, 50_000.0), // heavier non-fleet
         ];
         let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
         assert!(
@@ -580,10 +596,10 @@ mod tests {
         let now = 1_000_000_000_000;
         let mut snap = Snapshot::empty(now);
         snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
-        let mut remote = sess("remoteLoop", 99, "loop", now - 5_000, 300_000.0);
+        let mut remote = sess("remoteLoop", 99, "loop", None, 300_000.0);
         remote.host = Host::Remote { name: "r".into(), ssh_target: "u@h".into() };
         snap.sessions = vec![
-            sess("localLoop", 20, "loop", now - 5_000, 300_000.0), // local background
+            sess("localLoop", 20, "loop", None, 300_000.0), // local background
             remote,                                                // remote background — pause via ssh
         ];
         let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
@@ -607,16 +623,53 @@ mod tests {
         let now = 1_000_000_000_000;
         let mut snap = Snapshot::empty(now);
         snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
-        let mut cloud = sess("cloudLoop", 77, "loop", now - 5_000, 300_000.0);
+        let mut cloud = sess("cloudLoop", 77, "loop", None, 300_000.0);
         cloud.host = Host::Cloud;
         snap.sessions = vec![
-            sess("localLoop", 20, "loop", now - 5_000, 300_000.0),
+            sess("localLoop", 20, "loop", None, 300_000.0),
             cloud,
         ];
         let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
         let paused = planr.pause_pids();
         assert!(paused.contains(&20));
         assert!(!paused.contains(&77), "a cloud pid must never be selected for pause");
+    }
+
+    #[test]
+    fn low_pinned_sheds_before_a_normal_fleet() {
+        // A user-pinned Low session is a strict harm-tier: paused before any
+        // Normal session — even a heavier Normal fleet, and even though it burns
+        // less. Value-density alone would pause the fleet first; the Low tier wins.
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        let mut low = sess("pinnedLow", 60, "cli", None, 20_000.0); // light burn, but Low
+        low.priority_override = Some(Priority::Low);
+        snap.sessions = vec![
+            fleet_sess("normalFleet", 70, "wf", 5, now, 200_000.0), // Normal, heavy fleet
+            low,
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+        assert!(
+            matches!(&planr.actions[0], PaceAction::Pause { pid, .. } if *pid == 60),
+            "a user-pinned Low session must shed before a Normal fleet"
+        );
+    }
+
+    #[test]
+    fn high_pinned_is_never_paused() {
+        // Pinning High protects even a heavy autonomous burner; the Normal session
+        // is the one paced instead.
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        let mut high = sess("pinnedHigh", 80, "loop", None, 400_000.0);
+        high.priority_override = Some(Priority::High);
+        snap.sessions = vec![high, sess("normalLoop", 20, "loop", None, 100_000.0)];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+        let paused = planr.pause_pids();
+        assert!(!paused.contains(&80), "a High-pinned session must never be paused");
+        assert!(paused.contains(&20), "the Normal session should be the one paced");
     }
 
     #[test]
@@ -627,8 +680,8 @@ mod tests {
         let mut snap = Snapshot::empty(now);
         snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
         snap.sessions = vec![
-            sess("burner", 20, "loop", now - 5_000, 300_000.0),
-            sess("idle", 21, "loop", now - 5_000, 0.0), // idle background, pid present
+            sess("burner", 20, "loop", None, 300_000.0),
+            sess("idle", 21, "loop", None, 0.0), // idle background, pid present
         ];
         let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
         assert!(planr.price.is_finite(), "price must stay finite, got {}", planr.price);

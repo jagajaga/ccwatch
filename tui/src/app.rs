@@ -427,6 +427,20 @@ impl App {
         self.mode = Mode::Confirm(PendingAction { request, prompt });
     }
 
+    /// Cycle the selected session's Cruise priority override: auto → High → Low →
+    /// auto. Returns `(session_id, priority)` to send (no confirm — it's a cheap,
+    /// reversible pin), or `None` if no session is selected.
+    pub fn cycle_session_priority(&self) -> Option<(String, String)> {
+        use ccwatch_core::model::Priority;
+        let s = self.selected_session()?;
+        let next = match s.priority_override {
+            None => "high",
+            Some(Priority::High) => "low",
+            Some(Priority::Low) | Some(Priority::Normal) => "normal",
+        };
+        Some((s.id.clone(), next.to_string()))
+    }
+
     /// Stage the Cruise Control recommendation (pause its background sessions)
     /// for confirmation, if there's a plan with something to pause.
     pub fn stage_apply_pacing(&mut self) {
@@ -568,6 +582,8 @@ pub(crate) mod test_support {
             state: SessionState::Running,
             started_at: Some(0),
             last_activity: Some(9_000),
+            last_user_turn: Some(9_000),
+            priority_override: None,
             tokens: TokenLedger {
                 input: 4000,
                 output: 8000,
