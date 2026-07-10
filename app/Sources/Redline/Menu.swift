@@ -82,6 +82,15 @@ struct MenuContent: View {
                 Text("5h resets \(Fmt.clock(g.window.resetsAt)) · weekly resets \(Fmt.resetLabel(g.week?.resetsAt))")
                     .font(.caption2).foregroundStyle(.tertiary)
                 paceLine(g, snap.generatedAt)
+                // Cruise Control advisory (read-only in this step): if the pacer
+                // proposes pauses, show the first recommendation.
+                if let plan = snap.pacing, !plan.actions.isEmpty,
+                   let first = plan.actions.first(where: { $0.op == "pause" })?.reason {
+                    Text("⏸ Cruise · \(first)")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.teal)
+                        .lineLimit(2)
+                }
                 // Nudge to install the extension whenever the Governor lacks exact
                 // (reported) usage — it's the only way to match Claude to the percent.
                 if g.window.budgetSource != "reported"
