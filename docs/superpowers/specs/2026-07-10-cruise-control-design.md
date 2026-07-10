@@ -137,17 +137,20 @@ Advisory/One-click so the UI can show the plan.
 
 ### Normal regime — dual-price (mirror descent)
 
-One state variable, the pace price `λ`, updated each snapshot by dual gradient
-ascent:
+One state variable, the pace price `λ`, updated each snapshot by dual **mirror
+descent** — a *multiplicative* step on the *relative* pace error:
 
 ```
-λ ← max(0, λ + η · (actual_burn − target_rate))
+λ ← λ · exp( η · (actual_burn − target_rate) / target_rate )
 ```
 
+- Multiplicative, so `λ` stays positive and one **dimensionless** step-size `η`
+  (~0.05) is stable across tank scales; a plain additive `λ + η·(burn−target)`
+  would need `η < 2/target²` — a different η for the 5h tank vs the weekly tank.
 - `λ` rises when over target, falls when under — a smooth, self-tuning integral
-  controller with a single step-size `η`. No three PID gains, and no integral
-  windup: when the actuator *saturates* (only the exempt foreground is left),
-  `λ` simply settles higher and the planner takes no illegal action.
+  controller with a single knob. No three PID gains, and no integral windup: when
+  the actuator *saturates* (only the exempt foreground is left), `λ` settles
+  higher and the planner takes no illegal action.
 - The price sets each session's **allowed burn** (`weight / λ`). A Background
   session burning above its allowance is paused (fleet-sessions first, then the
   biggest overage) until projected fleet burn ≤ target; when under, paused

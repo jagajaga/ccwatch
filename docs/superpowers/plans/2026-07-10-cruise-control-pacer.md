@@ -218,8 +218,11 @@ git commit -m "feat(pacer): priority inference (foreground exempt, background pa
 
 ### Task 3: Dual-price controller + allowed-burn
 
-The core algorithm: update the scalar price `λ` by dual gradient ascent, and map
-a session's weight+price to its allowed burn (`weight / λ`).
+The core algorithm: update the scalar price `λ` by **dual mirror descent** — a
+*multiplicative* update on the *relative* pace error, so one dimensionless step
+size is stable across tank scales (a plain additive `λ + η·(burn−target)` needs
+`η < 2/target²`, i.e. a different η per tank). Map a session's weight+price to its
+allowed burn (`weight / λ`).
 
 **Files:**
 - Modify: `core/src/pacer.rs`
@@ -236,18 +239,19 @@ Append to the `tests` module:
 ```rust
     #[test]
     fn price_rises_over_target_and_falls_under() {
-        // Over target → price up.
-        let up = update_price(1.0, 800_000.0, 600_000.0, 1e-6);
+        // Multiplicative update on the relative error, dimensionless eta.
+        let up = update_price(1.0, 800_000.0, 600_000.0, 0.05);
         assert!(up > 1.0, "over target should raise price, got {up}");
-        // Under target → price down.
-        let down = update_price(1.0, 400_000.0, 600_000.0, 1e-6);
+        let down = update_price(1.0, 400_000.0, 600_000.0, 0.05);
         assert!(down < 1.0, "under target should lower price, got {down}");
     }
 
     #[test]
-    fn price_never_negative() {
-        // Massively under target must clamp at 0, not go negative.
-        assert_eq!(update_price(0.0, 0.0, 600_000.0, 1e-3), 0.0);
+    fn price_stays_positive_and_finite() {
+        // Massively under target must not collapse to zero (a multiplicative
+        // update can't recover from 0) nor go negative.
+        let p = update_price(0.0, 0.0, 600_000.0, 0.05);
+        assert!(p > 0.0 && p.is_finite(), "price stays positive+finite, got {p}");
     }
 
     #[test]
@@ -257,18 +261,35 @@ Append to the `tests` module:
     }
 
     #[test]
-    fn loop_converges_to_target() {
-        // Simulate: each tick, everyone burns their allowed share; price should
-        // drive total burn toward target. One unit, weight 1.
-        let target = 600_000.0;
-        let mut price = 1e-6;
-        let eta = 1e-9;
-        let mut burn = 2_000_000.0; // start way over
-        for _ in 0..2000 {
-            price = update_price(price, burn, target, eta);
-            burn = allowed_burn(1.0, price); // the unit obeys its permit
+    fn loop_converges_at_any_scale() {
+        // One unit obeys its price-share each tick; the price drives burn to the
+        // target. The SAME dimensionless eta works whether the target is small or
+        // large — the whole point of the multiplicative (mirror-descent) form.
+        for &target in &[600_000.0_f64, 6_000_000.0] {
+            let mut price = 1e-8;
+            let mut burn = allowed_burn(1.0, price);
+            for _ in 0..3000 {
+                price = update_price(price, burn, target, 0.05);
+                burn = allowed_burn(1.0, price);
+            }
+            assert!((burn - target).abs() / target < 0.05, "target {target}: burn {burn}");
         }
-        assert!((burn - target).abs() / target < 0.05, "converged near target: {burn}");
+    }
+
+    #[test]
+    fn price_is_bounded_and_recovers_near_exhaustion() {
+        // Near budget exhaustion target_rate → ~0 while burn is normal: the
+        // relative error explodes and exp() would overflow. λ must stay finite
+        // (≤ MAX_PRICE), not latch at +∞.
+        let stuck = update_price(1.0, 600_000.0, 0.001, 0.05);
+        assert!(stuck.is_finite() && stuck <= 1e9, "price bounded, got {stuck}");
+        // And once healthy under-target readings arrive, λ comes back down off the
+        // ceiling (allowed burn rises again) — the deadlock is recoverable.
+        let mut p = 1e9;
+        for _ in 0..500 {
+            p = update_price(p, 0.0, 600_000.0, 0.05);
+        }
+        assert!(p < 1.0, "price recovers off the ceiling, got {p}");
     }
 ```
 
@@ -282,16 +303,36 @@ Expected: FAIL — `update_price` not found.
 Add to `core/src/pacer.rs`:
 
 ```rust
-/// Dual gradient ascent on the budget constraint: the pace price `λ` rises when
-/// burn is over target and falls when under. `eta` is the step size. Clamped at
-/// zero (a non-binding budget has price 0). This is the whole pacing loop.
+/// Smallest price we allow. A multiplicative update can't climb back from an
+/// exact zero, so λ is floored here; `1 / MIN_PRICE` is the effective "unbounded"
+/// burn when the budget isn't binding.
+const MIN_PRICE: f64 = 1e-9;
+/// Ceiling on λ. At this price `allowed_burn = weight / 1e9 ≈ 0` (throttle
+/// everything), but it is *finite and recoverable*: near budget exhaustion the
+/// relative error explodes and `exp()` can overflow, so without a ceiling λ would
+/// latch at `+∞` and deadlock a unit at zero burn even after the budget recovers.
+/// `inf.clamp(_, MAX_PRICE) == MAX_PRICE`, so the overflow is caught here.
+const MAX_PRICE: f64 = 1e9;
+
+/// Dual **mirror descent** on the budget constraint (Balseiro et al.): the pace
+/// price `λ` moves *multiplicatively* by the **relative** pace error, so one
+/// dimensionless step size `eta` (~0.05) is stable across tank scales — a plain
+/// additive `λ + η·(burn − target)` would need `η < 2/target²`, i.e. a different
+/// η per tank. Over target → λ grows → allowed burn shrinks, and vice-versa. λ is
+/// kept in `[MIN_PRICE, MAX_PRICE]` so it stays positive and can never overflow.
 pub fn update_price(prev: f64, actual_burn: f64, target_rate: f64, eta: f64) -> f64 {
-    (prev + eta * (actual_burn - target_rate)).max(0.0)
+    let base = prev.clamp(MIN_PRICE, MAX_PRICE);
+    if target_rate <= 0.0 {
+        // No spendable budget → drive the price up hard (throttle everything).
+        return (base * eta.exp()).clamp(MIN_PRICE, MAX_PRICE);
+    }
+    let rel_err = (actual_burn - target_rate) / target_rate;
+    (base * (eta * rel_err).exp()).clamp(MIN_PRICE, MAX_PRICE)
 }
 
 /// A unit's allowed burn under the current price: `weight / λ`. Higher price
-/// throttles everyone; higher weight (priority) buys a bigger share. Price 0
-/// means the budget isn't binding → unbounded (represented as f64::INFINITY).
+/// throttles everyone; higher weight (priority) buys a bigger share. A
+/// non-positive price means the budget isn't binding → unbounded.
 pub fn allowed_burn(weight: f64, price: f64) -> f64 {
     if price <= 0.0 {
         f64::INFINITY
@@ -337,6 +378,8 @@ Append to the `tests` module:
         // zero/near-zero price it still produces a meaningfully positive price.
         assert_eq!(aimd_on_429(2.0, 4.0), 8.0);
         assert!(aimd_on_429(0.0, 4.0) > 0.0, "must brake even from price 0");
+        // Respects the same ceiling as update_price (no runaway past MAX_PRICE).
+        assert!(aimd_on_429(1e9, 4.0) <= 1e9, "AIMD stays within MAX_PRICE");
     }
 ```
 
@@ -355,9 +398,10 @@ Add to `core/src/pacer.rs`:
 const AIMD_FLOOR: f64 = 1e-6;
 
 /// AIMD multiplicative-increase on a fresh 429: jump the price by `cut`×. From a
-/// zero price, floor first so the brake actually bites.
+/// zero price, floor first so the brake actually bites; cap at `MAX_PRICE` so it
+/// obeys the same bound as `update_price` (its result becomes the new `λ`).
 pub fn aimd_on_429(price: f64, cut: f64) -> f64 {
-    price.max(AIMD_FLOOR) * cut
+    (price.max(AIMD_FLOOR) * cut).min(MAX_PRICE)
 }
 ```
 
@@ -510,6 +554,25 @@ background sessions, and asserts the plan pauses background (never foreground):
             _ => panic!("first action should be a Pause"),
         }
     }
+
+    #[test]
+    fn a_low_burn_fleet_still_pauses_before_a_bigger_non_fleet() {
+        // Fleets are a strict harm-tier: even a barely-burning fleet is shed
+        // before a heavier non-fleet loop — value-density alone would (wrongly)
+        // pause the loop first, so this guards the tiering.
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        snap.sessions = vec![
+            fleet_sess("fleetX", 40, "wf", 3, now, 10_000.0),   // tiny burn, but a fleet
+            sess("loopBig", 50, "loop", now - 5_000, 50_000.0), // heavier non-fleet
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+        assert!(
+            matches!(&planr.actions[0], PaceAction::Pause { pid, .. } if *pid == 40),
+            "the low-burn fleet must pause before the bigger non-fleet loop"
+        );
+    }
 ```
 
 - [ ] **Step 3: Add the test-only `Session` helper**
@@ -573,6 +636,28 @@ fn count_agents(ags: &[Agent]) -> usize {
     ags.iter().map(|a| 1 + count_agents(&a.children)).sum()
 }
 
+/// Keep-value of a Background session. Fleets — autonomous, unwatched, high-burn —
+/// are worth the least, so they shed first; other Background work is worth more.
+fn weight_of(is_fleet: bool) -> f64 {
+    if is_fleet {
+        1.0
+    } else {
+        4.0
+    }
+}
+
+/// Value density = keep-value per token/min. Pausing the lowest-density sessions
+/// first sheds the least-valuable work per token — the greedy Lagrangian-knapsack
+/// solution to "keep the most value within the target". The density at the cut IS
+/// the pace price λ.
+fn density(c: &Candidate) -> f64 {
+    if c.burn <= 0.0 {
+        f64::INFINITY
+    } else {
+        weight_of(c.is_fleet) / c.burn
+    }
+}
+
 /// Threaded controller state: just the scalar pace price.
 #[derive(Clone, Copy, Debug)]
 pub struct PacerState {
@@ -595,7 +680,7 @@ impl Default for PacerConfig {
         PacerConfig {
             reserve: 0,
             deadline_ms: None,
-            eta: 1e-9,
+            eta: 0.05, // dimensionless mirror-descent step (see Task 3)
             aimd_cut: 4.0,
             idle_secs: 120,
             dead_band: 0.1,
@@ -604,9 +689,14 @@ impl Default for PacerConfig {
 }
 
 /// Compute the pacing plan for one snapshot. Pure: `now_ms` and `saw_429` are
-/// inputs, `prev` carries the price forward. Emits pause actions on Background
-/// sessions whose burn exceeds their price-set share, ordered by the biggest
-/// overage first, until projected burn ≤ target. Foreground is never touched.
+/// inputs. Selection is a greedy **value-density knapsack** for our discrete
+/// whole-session actuator: fleets are a strict harm-tier that always sheds before
+/// non-fleet Background, and within a tier the lowest value-density (`weight /
+/// burn`) pauses first, until projected burn ≤ target. The reported price `λ` is
+/// the value-density at the cut. Foreground is never touched. (The mirror-descent
+/// primitives `update_price` / `aimd_on_429` provide the smooth continuous price
+/// for a future finer-grained actuator; the discrete knapsack here is exact and
+/// immediate.)
 pub fn plan(
     snap: &Snapshot,
     cfg: &PacerConfig,
@@ -633,19 +723,18 @@ pub fn plan(
         .unwrap_or(0);
     let deadline = cfg.deadline_ms.or(tank.resets_at);
     let mins = deadline.map(|d| (d - now_ms) as f64 / 60_000.0).unwrap_or(0.0);
-    let target = target_rate(remaining, cfg.reserve, mins);
+    let mut target = target_rate(remaining, cfg.reserve, mins);
     let actual = tank.rate_per_min;
 
-    // Update the price: AIMD brake on a fresh 429, else dual gradient ascent.
-    let price = if saw_429 {
-        aimd_on_429(prev.price, cfg.aimd_cut)
-    } else {
-        update_price(prev.price, actual, target, cfg.eta)
-    };
+    // A fresh 429 is a hard signal the smooth pace is too slow: pace to a fraction
+    // of target until it clears (AIMD, expressed in target space).
+    if saw_429 {
+        target /= cfg.aimd_cut.max(1.0);
+    }
 
-    // Candidate throttle units = Background sessions with a live pid. Each knows
-    // whether it's a fleet (its live work is a Workflow) and carries a human label
-    // so fleet-sessions pause first and every action reads as the fleet.
+    // Candidate throttle units = Background sessions with a live pid (foreground /
+    // High is excluded before we ever plan). Each knows whether it's a fleet and
+    // carries a human label so every action reads the way the user thinks.
     let mut candidates: Vec<Candidate> = snap
         .sessions
         .iter()
@@ -660,33 +749,43 @@ pub fn plan(
         })
         .collect();
 
-    // Pause fleet-sessions first, then the biggest burners, until projected burn
-    // ≤ target — but only when over target by more than the dead-band (anti-flap).
+    // Greedy value-density knapsack, tiered: fleets are a strict harm-tier and
+    // always shed before non-fleet Background (pausing autonomous, unwatched work
+    // is low-harm — a barely-burning fleet still goes before a heavy loop). Within
+    // a tier, pause the lowest value-density (`weight/burn`) first. Only act when
+    // over target by more than the dead-band (anti-flap). `price` = the
+    // value-density at the cut (λ).
+    let over = target > 0.0 && actual > target * (1.0 + cfg.dead_band);
     let mut actions = Vec::new();
-    if target > 0.0 && actual > target * (1.0 + cfg.dead_band) {
+    let mut price = 0.0;
+    if over {
         candidates.sort_by(|a, b| {
             b.is_fleet
-                .cmp(&a.is_fleet)
-                .then(b.burn.partial_cmp(&a.burn).unwrap_or(std::cmp::Ordering::Equal))
+                .cmp(&a.is_fleet) // fleets (true) before non-fleets
+                .then(density(a).partial_cmp(&density(b)).unwrap_or(std::cmp::Ordering::Equal))
         });
         let mut projected = actual;
-        let share = allowed_burn(1.0, price); // per-unit ceiling
-        for c in candidates {
+        for c in &candidates {
             if projected <= target {
+                price = density(c); // first session we keep sets the cut price
                 break;
             }
-            if c.burn > share {
-                actions.push(PaceAction::Pause {
-                    pid: c.pid,
-                    reason: format!("pause {}: {:.0}/min over pace share", c.label, c.burn),
-                });
-                projected -= c.burn;
-            }
+            actions.push(PaceAction::Pause {
+                pid: c.pid,
+                reason: format!("pause {}: {:.0}/min (value-density {:.1e})", c.label, c.burn, density(c)),
+            });
+            projected -= c.burn;
+            price = density(c); // last session we pause sets the cut price
         }
     }
 
-    let reason = if actions.is_empty() {
+    // Distinguish "coasting" from "over target but nothing we may pause" — the
+    // latter is a real state (only the exempt foreground is left) and must not be
+    // reported as coasting.
+    let reason = if !over {
         format!("coasting: {actual:.0} ≤ target {target:.0}/min")
+    } else if actions.is_empty() {
+        format!("over target ({actual:.0} > {target:.0}/min) — no background sessions to pause")
     } else {
         format!("{} over target → pausing {} background session(s)", actual as u64, actions.len())
     };
@@ -726,7 +825,7 @@ plus a `mode` string. Follow the existing hand-rolled parser in `config.rs`.
 
 **Interfaces:**
 - Consumes: the existing `Config` struct and its line parser (`set_i64`, inline-`#`-comment stripping).
-- Produces: `Config` gains `pub cruise_mode: String` (default `"off"`), `pub cruise_reserve: u64` (default 0), `pub cruise_eta: f64` (default `1e-9`), `pub cruise_aimd_cut: f64` (default `4.0`), `pub cruise_dead_band: f64` (default `0.1`); and `pub fn pacer_config(&self) -> ccwatch_core::pacer::PacerConfig` (in-crate: `crate::pacer::PacerConfig`).
+- Produces: `Config` gains `pub cruise_mode: String` (default `"off"`), `pub cruise_reserve: u64` (default 0), `pub cruise_eta: f64` (default `0.05` — the dimensionless mirror-descent step from Task 3), `pub cruise_aimd_cut: f64` (default `4.0`), `pub cruise_dead_band: f64` (default `0.1`); and `pub fn pacer_config(&self) -> ccwatch_core::pacer::PacerConfig` (in-crate: `crate::pacer::PacerConfig`).
 
 - [ ] **Step 1: Write the failing test**
 
