@@ -7,3 +7,4 @@ app/.build/
 # packaged extension artifacts
 dist-ext/
 redline-usage-bridge-*
+.superpowers/
