@@ -86,10 +86,13 @@ struct MenuContent: View {
                 // proposes pauses, show the first recommendation.
                 if let plan = snap.pacing, !plan.actions.isEmpty,
                    let first = plan.actions.first(where: { $0.op == "pause" })?.reason {
-                    Text("⏸ Cruise · \(first)")
-                        .font(.caption2)
-                        .foregroundStyle(Palette.teal)
-                        .lineLimit(2)
+                    HStack(spacing: 6) {
+                        Text("⏸ Cruise · \(first)")
+                            .font(.caption2).foregroundStyle(Palette.teal).lineLimit(2)
+                        Spacer()
+                        Button("Apply") { store.applyPacing() }
+                            .buttonStyle(.borderless).font(.caption2).foregroundStyle(Palette.teal)
+                    }
                 }
                 // Nudge to install the extension whenever the Governor lacks exact
                 // (reported) usage — it's the only way to match Claude to the percent.

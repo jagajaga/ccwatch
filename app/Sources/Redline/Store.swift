@@ -236,4 +236,7 @@ final class Store: ObservableObject {
     nonisolated func resumeSession(pid: Int) {
         client.sendAction(["msg": "action", "action": "resume_session", "pid": pid])
     }
+    nonisolated func applyPacing() {
+        client.sendAction(["msg": "action", "action": "apply_pacing"])
+    }
 }
