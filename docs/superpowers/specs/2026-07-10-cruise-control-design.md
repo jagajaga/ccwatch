@@ -44,8 +44,10 @@ gauge into a thermostat.
 
 - Fine-grained per-request shaping. Redline observes `~/.claude`; it does not
   proxy the Anthropic API, so it cannot inject per-request delays. The actuator
-  is pause/resume of processes (whole sessions and, preferentially, individual
-  fleet agents).
+  is pause/resume of **session processes** (SIGSTOP/SIGCONT). Claude Code runs a
+  session's whole agent fleet inside one process — there is no per-agent OS
+  handle — so pacing acts on session processes; pausing a fleet-session pauses
+  all its agents at once.
 - Changing what Claude Code does. We only start/stop OS processes it already
   spawned.
 - Cross-machine coordination beyond what the remote probe already provides.
@@ -103,22 +105,30 @@ pacing loop.
 
 ## The actuator
 
-Ordered from finest to coarsest; the planner always prefers the finest that
-achieves the target:
+The unit is the **session process** (SIGSTOP/SIGCONT via the existing
+`pause`/`resume` actions — no new privilege). Claude Code runs a session's entire
+agent fleet *inside* one process — verified on-machine: even a 171-agent workflow
+is a single `claude` process with no child processes — so there is no way to
+SIGSTOP an individual agent. Pausing a session pauses **all** its agents at once,
+which is exactly what we want for a background fleet.
 
-1. **Fleet concurrency (primary).** Workflow runs spawn dozens–hundreds of
-   parallel background agents (observed: 171 live in one run). Pausing a
-   *fraction* of a fleet's agent processes dials its burn down smoothly — this is
-   adaptive concurrency limiting / probabilistic throttling, not a blunt on/off.
-   Prefer pausing an agent that is *between turns* (no in-flight tool call) to
-   avoid killing a live request.
-2. **Whole Background session pause.** When a session has no fleet to thin (a
-   plain `/loop` or a single long agent), pause the session process.
-3. **Never the foreground.** High/exempt sessions are removed from the candidate
-   set before planning.
+Throttle order:
 
-Mechanism is the existing `pause`/`resume` actions (SIGSTOP/SIGCONT) applied to
-the chosen pids; no new privilege.
+1. **Fleet-sessions first.** A session whose live work is a Workflow (now surfaced
+   as a `Workflow` node with N nested agents) is the ideal target: fully
+   autonomous, high-burn, unwatched. It is the **preferred pause target**
+   (throttled before other Background work), and every action naming it reads as
+   the fleet — *"pause fleet `score_v3_holdout` (52 agents)"* — because that's how
+   the user thinks about it.
+2. **Other Background sessions** — `/loop`s, single long agents, remote/overnight.
+3. **Never the foreground.** High/exempt sessions are removed before planning.
+
+Because the actuator is whole-session on/off, the price sets a per-session
+*ceiling*: a Background session burning above its price-share is paused
+(fleet-sessions first, then biggest overage) until projected burn ≤ target, and
+resumed in reverse when under. Pausing a *subset* of a fleet's agents to shave
+concurrency without stopping it is **not possible externally** — that needs a
+concurrency lever inside Claude Code (a `Workflow` cap) — so it is out of scope.
 
 ## The control loop
 
@@ -138,12 +148,14 @@ ascent:
   controller with a single step-size `η`. No three PID gains, and no integral
   windup: when the actuator *saturates* (only the exempt foreground is left),
   `λ` simply settles higher and the planner takes no illegal action.
-- The price maps to an **allowed concurrency per fleet**: `permits =
-  round(weight / λ)` agents may run; the planner pauses the rest (preferring
-  agents *between* turns). This quantises the continuous price onto the discrete
-  actuator cleanly.
-- A **dead-band** on `permits` changes plus a minimum dwell time between actions
-  prevents pause/resume flapping.
+- The price sets each session's **allowed burn** (`weight / λ`). A Background
+  session burning above its allowance is paused (fleet-sessions first, then the
+  biggest overage) until projected fleet burn ≤ target; when under, paused
+  sessions resume in reverse order. Whole-session on/off is the only granularity
+  (agents are in-process), so the price quantises to a pause/keep decision per
+  session.
+- A **dead-band** (act only when over/under target by more than a margin) plus a
+  minimum dwell time between actions prevents pause/resume flapping.
 
 ### 429 regime — AIMD panic-brake
 
@@ -204,12 +216,14 @@ and shared. Modes differ only in what happens to the plan:
 
 ## Risks & mitigations
 
-- **Coarse actuator** → fleet-concurrency granularity gives many small knobs;
-  whole-session pause only as fallback.
-- **In-flight request timeout when paused** → prefer pausing agents between turns
-  (no pending tool call); accept that a paused agent may drop a live request and
-  retry on resume (Claude Code already tolerates this on SIGCONT in practice —
-  **must be validated**).
+- **Coarse actuator (whole-session on/off).** Agents are in-process, so we can't
+  thin a fleet — we pause the whole session. Mitigated by targeting *fleet*
+  sessions (autonomous, unwatched → low-harm to pause) and by the price ordering
+  (biggest burner first → few sessions move).
+- **In-flight request dropped when paused** → a SIGSTOP'd session freezes any
+  in-flight API call; on SIGCONT it may error that turn and retry. Prefer pausing
+  a session with no pending tool call. Claude Code appears to tolerate SIGCONT
+  resume in practice — **must be validated before Autonomous.**
 - **Flapping** → hysteresis band + minimum dwell time + additive resume.
 - **Pausing the wrong (foreground) thing** → conservative exemption; foreground
   removed from candidates before planning; global "release" hotkey.
@@ -242,9 +256,9 @@ Each step ships independently and is useful on its own.
 
 ## Open questions
 
-- Does a SIGSTOP'd Claude Code agent cleanly resume a dropped in-flight request on
-  SIGCONT, or does it error the turn? Determines whether "pause between turns" is a
-  nicety or a hard requirement. **Validate before Autonomous.**
+- Does a SIGSTOP'd Claude Code *session* cleanly resume its in-flight work on
+  SIGCONT, or does it error the current turn? Determines whether we must prefer
+  pausing sessions that are idle-between-turns. **Validate before Autonomous.**
 - Reservation/deadline UI: minimal (one reserve field + one datetime) for v1;
   richer "profiles" later.
 
