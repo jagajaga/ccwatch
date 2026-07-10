@@ -44,6 +44,8 @@ struct PacingPlan: Decodable {
     var auto: Bool = false
     /// How many sessions Cruise currently has paused (autonomous mode).
     var paced: Int = 0
+    /// Total tokens/min held (summed burn of the paused sessions).
+    var pausedRate: Double = 0
 }
 
 struct Tank: Decodable {
@@ -82,6 +84,8 @@ struct Session: Decodable, Identifiable {
     /// User's Cruise priority override: "high" (never pause) | "low" (shed first) |
     /// nil (auto — Cruise decides).
     var priorityOverride: String?
+    /// True when Cruise Control currently has this session paused (SIGSTOP).
+    var pausedByCruise: Bool = false
     var tokens: Ledger = Ledger()
     var tokensPerMin: Double = 0
     var cpuPct: Double = 0

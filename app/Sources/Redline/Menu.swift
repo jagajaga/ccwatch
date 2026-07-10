@@ -88,7 +88,8 @@ struct MenuContent: View {
                 // otherwise (advisory-only), show the first recommendation with Apply.
                 if let plan = snap.pacing, plan.auto {
                     HStack(spacing: 6) {
-                        Text("⚙︎ Cruise auto · \(plan.paced) paused")
+                        Text("⚙︎ Cruise auto · \(plan.paced) paused"
+                            + (plan.pausedRate > 0 ? " · \(Fmt.rate(plan.pausedRate)) held" : ""))
                             .font(.caption2).foregroundStyle(Palette.teal)
                         Spacer()
                         Button("Release") { store.setCruiseMode("off"); cruiseMode = "off" }
@@ -275,10 +276,20 @@ struct SessionCard: View {
                     HStack(spacing: 6) {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 9)).foregroundStyle(.secondary)
-                        Circle().fill(Fmt.stateColor(s.state)).frame(width: 8, height: 8)
+                        Circle().fill(s.pausedByCruise ? Palette.orange : Fmt.stateColor(s.state))
+                            .frame(width: 8, height: 8)
                         Text(s.title ?? s.name).fontWeight(.medium).lineLimit(1)
+                        if s.pausedByCruise {
+                            Text("⏸ PAUSED").font(.caption2.weight(.bold))
+                                .foregroundStyle(Palette.orange)
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Palette.orange.opacity(0.18))
+                                .clipShape(Capsule())
+                        }
                         Spacer()
-                        Text(Fmt.rate(s.tokensPerMin)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        Text(Fmt.rate(s.tokensPerMin))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(s.pausedByCruise ? Palette.orange : .secondary)
                     }
                     HStack(spacing: 8) {
                         if let m = s.model { Text(tier(m)).foregroundStyle(Fmt.tierColor(tier(m))) }
