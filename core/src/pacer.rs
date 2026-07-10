@@ -50,6 +50,10 @@ const MIN_PRICE: f64 = 1e-9;
 /// `inf.clamp(_, MAX_PRICE) == MAX_PRICE`, so the overflow is caught here.
 const MAX_PRICE: f64 = 1e9;
 
+/// Smallest non-zero price the brake floors to, so an AIMD cut from price 0 still
+/// throttles hard instead of multiplying zero.
+const AIMD_FLOOR: f64 = 1e-6;
+
 /// Dual **mirror descent** on the budget constraint (Balseiro et al.): the pace
 /// price `λ` moves *multiplicatively* by the **relative** pace error, so one
 /// dimensionless step size `eta` (~0.05) is stable across tank scales — a plain
@@ -75,6 +79,13 @@ pub fn allowed_burn(weight: f64, price: f64) -> f64 {
     } else {
         weight / price
     }
+}
+
+/// AIMD multiplicative-increase on a fresh 429: jump the price by `cut`×. From a
+/// zero price, floor first so the brake actually bites; cap at `MAX_PRICE` so it
+/// obeys the same bound as `update_price` (its result becomes the new `λ`).
+pub fn aimd_on_429(price: f64, cut: f64) -> f64 {
+    (price.max(AIMD_FLOOR) * cut).min(MAX_PRICE)
 }
 
 #[cfg(test)]
@@ -175,5 +186,15 @@ mod tests {
             p = update_price(p, 0.0, 600_000.0, 0.05);
         }
         assert!(p < 1.0, "price recovers off the ceiling, got {p}");
+    }
+
+    #[test]
+    fn aimd_multiplicatively_jumps_the_price() {
+        // A 429 with cut factor 4 quadruples the price (a hard brake). From a
+        // zero/near-zero price it still produces a meaningfully positive price.
+        assert_eq!(aimd_on_429(2.0, 4.0), 8.0);
+        assert!(aimd_on_429(0.0, 4.0) > 0.0, "must brake even from price 0");
+        // Respects the same ceiling as update_price (no runaway past MAX_PRICE).
+        assert!(aimd_on_429(1e9, 4.0) <= 1e9, "AIMD stays within MAX_PRICE");
     }
 }
