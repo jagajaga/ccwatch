@@ -114,6 +114,28 @@ fn count_agents(ags: &[Agent]) -> usize {
     ags.iter().map(|a| 1 + count_agents(&a.children)).sum()
 }
 
+/// Keep-value of a Background session. Fleets — autonomous, unwatched, high-burn —
+/// are worth the least, so they shed first; other Background work is worth more.
+fn weight_of(is_fleet: bool) -> f64 {
+    if is_fleet {
+        1.0
+    } else {
+        4.0
+    }
+}
+
+/// Value density = keep-value per token/min. Pausing the lowest-density sessions
+/// first sheds the least-valuable work per token — the greedy Lagrangian-knapsack
+/// solution to "keep the most value within the target". The density at the cut IS
+/// the pace price λ.
+fn density(c: &Candidate) -> f64 {
+    if c.burn <= 0.0 {
+        f64::INFINITY
+    } else {
+        weight_of(c.is_fleet) / c.burn
+    }
+}
+
 /// Threaded controller state: just the scalar pace price.
 #[derive(Clone, Copy, Debug)]
 pub struct PacerState {
@@ -145,9 +167,14 @@ impl Default for PacerConfig {
 }
 
 /// Compute the pacing plan for one snapshot. Pure: `now_ms` and `saw_429` are
-/// inputs, `prev` carries the price forward. Emits pause actions on Background
-/// sessions whose burn exceeds their price-set share, ordered by the biggest
-/// overage first, until projected burn ≤ target. Foreground is never touched.
+/// inputs. Selection is a greedy **value-density knapsack** for our discrete
+/// whole-session actuator: pause the lowest value-density (`weight / burn`)
+/// Background sessions first until projected burn ≤ target — so fleets (worth
+/// least per token) shed before other work, and the reported price `λ` is the
+/// value-density at the cut. Foreground is never touched. (The mirror-descent
+/// primitives `update_price` / `aimd_on_429` provide the smooth continuous price
+/// for a future finer-grained actuator; the discrete knapsack here is exact and
+/// immediate.)
 pub fn plan(
     snap: &Snapshot,
     cfg: &PacerConfig,
@@ -174,19 +201,18 @@ pub fn plan(
         .unwrap_or(0);
     let deadline = cfg.deadline_ms.or(tank.resets_at);
     let mins = deadline.map(|d| (d - now_ms) as f64 / 60_000.0).unwrap_or(0.0);
-    let target = target_rate(remaining, cfg.reserve, mins);
+    let mut target = target_rate(remaining, cfg.reserve, mins);
     let actual = tank.rate_per_min;
 
-    // Update the price: AIMD brake on a fresh 429, else dual gradient ascent.
-    let price = if saw_429 {
-        aimd_on_429(prev.price, cfg.aimd_cut)
-    } else {
-        update_price(prev.price, actual, target, cfg.eta)
-    };
+    // A fresh 429 is a hard signal the smooth pace is too slow: pace to a fraction
+    // of target until it clears (AIMD, expressed in target space).
+    if saw_429 {
+        target /= cfg.aimd_cut.max(1.0);
+    }
 
-    // Candidate throttle units = Background sessions with a live pid. Each knows
-    // whether it's a fleet (its live work is a Workflow) and carries a human label
-    // so fleet-sessions pause first and every action reads as the fleet.
+    // Candidate throttle units = Background sessions with a live pid (foreground /
+    // High is excluded before we ever plan). Each knows whether it's a fleet and
+    // carries a human label so every action reads the way the user thinks.
     let mut candidates: Vec<Candidate> = snap
         .sessions
         .iter()
@@ -201,34 +227,26 @@ pub fn plan(
         })
         .collect();
 
-    // Pause fleet-sessions first, then the biggest burners, until projected burn
-    // ≤ target — but only when over target by more than the dead-band (anti-flap).
+    // Greedy value-density knapsack: pause the lowest-density work first until the
+    // projected burn is back at/under target — but only when over by more than the
+    // dead-band (anti-flap). `price` = the value-density at the cut (λ).
     let mut actions = Vec::new();
+    let mut price = 0.0;
     if target > 0.0 && actual > target * (1.0 + cfg.dead_band) {
-        candidates.sort_by(|a, b| {
-            b.is_fleet
-                .cmp(&a.is_fleet)
-                .then(b.burn.partial_cmp(&a.burn).unwrap_or(std::cmp::Ordering::Equal))
-        });
-        // NOTE: gating each candidate on `c.burn > allowed_burn(1.0, price)` (as
-        // originally sketched) is a no-op on a cold/early tick: the mirror-descent
-        // price starts at MIN_PRICE and only takes a small multiplicative step per
-        // call (see `loop_converges_at_any_scale`, which needs ~3000 iterations to
-        // converge), so `allowed_burn` is still astronomically larger than any real
-        // burn rate and nothing would ever get paused on the first few ticks even
-        // though we're already far over target. The dead-band check above already
-        // decided we're substantially over target, so just pause fleet-first,
-        // biggest-burner-next, until the projected burn is back at or under target.
+        candidates
+            .sort_by(|a, b| density(a).partial_cmp(&density(b)).unwrap_or(std::cmp::Ordering::Equal));
         let mut projected = actual;
-        for c in candidates {
+        for c in &candidates {
             if projected <= target {
+                price = density(c); // first session we keep sets the cut price
                 break;
             }
             actions.push(PaceAction::Pause {
                 pid: c.pid,
-                reason: format!("pause {}: {:.0}/min over pace share", c.label, c.burn),
+                reason: format!("pause {}: {:.0}/min (value-density {:.1e})", c.label, c.burn, density(c)),
             });
             projected -= c.burn;
+            price = density(c); // last session we pause sets the cut price
         }
     }
 
