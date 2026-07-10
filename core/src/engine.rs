@@ -626,6 +626,7 @@ impl Engine {
                 last_activity,
                 last_user_turn: leak_inputs.last_user_turn,
                 priority_override: None, // stamped by the daemon from its override map
+                paused_by_cruise: false, // stamped by the daemon from its paced set
                 tokens: ledger,
                 tokens_per_min,
                 cpu_pct: stat.cpu_pct,

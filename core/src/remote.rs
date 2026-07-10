@@ -349,6 +349,7 @@ mod tests {
             last_activity: Some(0),
             last_user_turn: None,
             priority_override: None,
+            paused_by_cruise: false,
             tokens: TokenLedger {
                 input: 100,
                 output: 200,

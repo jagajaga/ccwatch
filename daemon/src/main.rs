@@ -405,9 +405,30 @@ fn main() -> anyhow::Result<()> {
                 if c.paced != before {
                     persist_paced(&cruise_paths, &c.paced);
                 }
+                // Mark exactly which sessions are frozen and sum their held burn,
+                // so the UI can show what's paused (badge + numbers), not just a
+                // bare count.
+                let mut held = 0.0;
+                for s in &mut snap.sessions {
+                    let ssh = match &s.host {
+                        ccwatch_core::model::Host::Remote { ssh_target, .. } => {
+                            Some(ssh_target.clone())
+                        }
+                        _ => None,
+                    };
+                    let paused = s
+                        .pid
+                        .map(|pid| c.paced.contains(&PaceTarget { pid, ssh }))
+                        .unwrap_or(false);
+                    s.paused_by_cruise = paused;
+                    if paused {
+                        held += s.tokens_per_min;
+                    }
+                }
                 if let Some(p) = snap.pacing.as_mut() {
                     p.auto = auto;
                     p.paced = c.paced.len();
+                    p.paused_rate = held;
                 }
             }
             snap

@@ -204,6 +204,7 @@ pub fn plan(
                 reason: "no governor data".into(),
                 auto: false,
                 paced: 0,
+                paused_rate: 0.0,
             },
             prev,
         );
@@ -323,7 +324,16 @@ pub fn plan(
     // excluded, so this is defensive.
     let price = price.min(MAX_PRICE);
     (
-        PacingPlan { target_rate: target, actual_rate: actual, price, actions, reason, auto: false, paced: 0 },
+        PacingPlan {
+            target_rate: target,
+            actual_rate: actual,
+            price,
+            actions,
+            reason,
+            auto: false,
+            paced: 0,
+            paused_rate: 0.0,
+        },
         PacerState { price },
     )
 }

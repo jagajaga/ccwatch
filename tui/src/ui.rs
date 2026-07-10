@@ -2,7 +2,9 @@
 
 use crate::app::{agent_at, App, Mode, RowRef};
 use crate::format;
-use ccwatch_core::model::{AgentState, Alert, Host, Session, SessionState, Severity, WatcherKind};
+use ccwatch_core::model::{
+    AgentState, Alert, Host, Priority, Session, SessionState, Severity, WatcherKind,
+};
 use std::collections::BTreeMap;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
@@ -88,7 +90,12 @@ fn governor_estimated(app: &App) -> bool {
 fn pacing_advisory(app: &App) -> Option<String> {
     let p = app.snapshot.pacing.as_ref()?;
     if p.auto {
-        return Some(format!("Cruise AUTO · {} paused (X to release)", p.paced));
+        let held = if p.paused_rate > 0.0 {
+            format!(" · {} held", format::rate(p.paused_rate))
+        } else {
+            String::new()
+        };
+        return Some(format!("Cruise AUTO · {} paused{held} (X to release)", p.paced));
     }
     if p.actions.is_empty() {
         return None;
@@ -429,10 +436,22 @@ fn session_line(s: &Session, app: &App, w: &Widths) -> Line<'static> {
         .unwrap_or_else(|| "-".into());
     // Prefer the human title (same names Claude's UI shows); slug in details.
     let display = s.title.as_deref().unwrap_or(&s.name);
+    // Cruise markers: ⏸ when paused, and a priority-pin glyph (⇧ High / ⇩ Low).
+    let pause_mark = if s.paused_by_cruise { "⏸ " } else { "" };
+    let pin = match s.priority_override {
+        Some(Priority::High) => "⇧ ",
+        Some(Priority::Low) => "⇩ ",
+        _ => "",
+    };
+    let name_style = if s.paused_by_cruise {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
     Line::from(vec![
         Span::styled(
-            cell(&format!("{expand}{display}"), w.name),
-            Style::default().add_modifier(Modifier::BOLD),
+            cell(&format!("{expand}{pause_mark}{pin}{display}"), w.name),
+            name_style,
         ),
         host_cell(&s.host, w),
         state_span(s.state, w),
@@ -1057,6 +1076,7 @@ mod tests {
             reason: "500000 over target → pausing 1 background session(s)".into(),
             auto: false,
             paced: 0,
+            paused_rate: 0.0,
         });
         let app = app_with(snap);
         let s = render(&app);
@@ -1076,6 +1096,7 @@ mod tests {
             reason: "auto-pacing".into(),
             auto: true,
             paced: 3,
+            paused_rate: 0.0,
         });
         let app = app_with(snap);
         let s = render(&app);

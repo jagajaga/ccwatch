@@ -584,6 +584,7 @@ pub(crate) mod test_support {
             last_activity: Some(9_000),
             last_user_turn: Some(9_000),
             priority_override: None,
+            paused_by_cruise: false,
             tokens: TokenLedger {
                 input: 4000,
                 output: 8000,
@@ -746,6 +747,7 @@ mod tests {
             reason: "over".into(),
             auto: false,
             paced: 0,
+            paused_rate: 0.0,
         });
         let mut app = app_with(snap);
         app.stage_apply_pacing();
@@ -767,6 +769,7 @@ mod tests {
             reason: "auto-pacing".into(),
             auto: true,
             paced: 3,
+            paused_rate: 0.0,
         });
         let mut app = app_with(snap);
         app.stage_release_cruise();

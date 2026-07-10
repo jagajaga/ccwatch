@@ -140,6 +140,7 @@ fn daemon_merges_remote_and_cancels() {
         last_activity: Some(0),
         last_user_turn: None,
         priority_override: None,
+        paused_by_cruise: false,
         tokens: TokenLedger { input: 1, output: 2, ..Default::default() },
         tokens_per_min: 1234.0,
         cpu_pct: 0.0,

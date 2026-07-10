@@ -160,6 +160,10 @@ pub struct PacingPlan {
     /// How many sessions Cruise currently has paused (autonomous mode).
     #[serde(default)]
     pub paced: usize,
+    /// Total tokens/min currently held (summed burn of the paused sessions) — the
+    /// "numbers" behind the paused count.
+    #[serde(default)]
+    pub paused_rate: f64,
 }
 
 impl PacingPlan {
@@ -456,6 +460,10 @@ pub struct Session {
     /// its persisted override map.
     #[serde(default)]
     pub priority_override: Option<Priority>,
+    /// True when Cruise Control currently has this session paused (SIGSTOP, local
+    /// or remote). Stamped by the daemon so the UI can mark exactly what's frozen.
+    #[serde(default)]
+    pub paused_by_cruise: bool,
     pub tokens: TokenLedger,
     pub tokens_per_min: f64,
     pub cpu_pct: f32,
@@ -655,6 +663,7 @@ mod tests {
             reason: String::new(),
             auto: false,
             paced: 0,
+            paused_rate: 0.0,
         };
         assert_eq!(plan.pause_pids(), vec![10, 30]);
         // pause_targets carries the host so the daemon actuates a remote pid over
