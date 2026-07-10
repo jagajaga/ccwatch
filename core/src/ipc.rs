@@ -26,6 +26,8 @@ pub enum ActionRequest {
     /// Cancel a remote/cloud entity (e.g. a routine) via its host's configured
     /// cancel command.
     CancelRemote { remote: String, id: String },
+    /// Apply the daemon's current pacing plan once: pause every session it named.
+    ApplyPacing,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -376,6 +376,20 @@ fn execute_action(
         ActionRequest::CancelRemote { remote, id } => {
             cancel_remote(remote_defs, remote, id, snapshot)
         }
+        ActionRequest::ApplyPacing => {
+            let pids = snapshot
+                .pacing
+                .as_ref()
+                .map(|p| p.pause_pids())
+                .unwrap_or_default();
+            let mut paused = 0usize;
+            for pid in pids {
+                if matches!(actions::pause(pid), ActionOutcome::Ok(_)) {
+                    paused += 1;
+                }
+            }
+            ActionOutcome::Ok(format!("Cruise: paused {paused} background session(s)"))
+        }
     }
 }
 

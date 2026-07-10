@@ -130,6 +130,20 @@ pub struct PacingPlan {
     pub reason: String,
 }
 
+impl PacingPlan {
+    /// The pids the plan recommends pausing (Pause actions only). By construction
+    /// (see `pacer::plan`) these are always Background sessions — never foreground.
+    pub fn pause_pids(&self) -> Vec<i32> {
+        self.actions
+            .iter()
+            .filter_map(|a| match a {
+                PaceAction::Pause { pid, .. } => Some(*pid),
+                PaceAction::Resume { .. } => None,
+            })
+            .collect()
+    }
+}
+
 /// A subagent invocation detected from an `Agent`/`Task`/`Workflow` tool call.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Agent {
@@ -564,5 +578,21 @@ mod tests {
             week: Some(tank(1.4, Some(now + 500 * 60_000))),
         };
         assert!(g.binding().1, "the walling weekly tank should bind over a coasting 5h");
+    }
+
+    #[test]
+    fn pacing_plan_pause_pids_lists_only_pause_targets() {
+        let plan = PacingPlan {
+            target_rate: 0.0,
+            actual_rate: 0.0,
+            price: 0.0,
+            actions: vec![
+                PaceAction::Pause { pid: 10, reason: "a".into() },
+                PaceAction::Resume { pid: 20 },
+                PaceAction::Pause { pid: 30, reason: "b".into() },
+            ],
+            reason: String::new(),
+        };
+        assert_eq!(plan.pause_pids(), vec![10, 30]);
     }
 }
