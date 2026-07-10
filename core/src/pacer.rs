@@ -39,6 +39,24 @@ pub fn target_rate(remaining: u64, reserve: u64, mins_to_deadline: f64) -> f64 {
     spendable / mins_to_deadline
 }
 
+/// Dual gradient ascent on the budget constraint: the pace price `λ` rises when
+/// burn is over target and falls when under. `eta` is the step size. Clamped at
+/// zero (a non-binding budget has price 0). This is the whole pacing loop.
+pub fn update_price(prev: f64, actual_burn: f64, target_rate: f64, eta: f64) -> f64 {
+    (prev + eta * (actual_burn - target_rate)).max(0.0)
+}
+
+/// A unit's allowed burn under the current price: `weight / λ`. Higher price
+/// throttles everyone; higher weight (priority) buys a bigger share. Price 0
+/// means the budget isn't binding → unbounded (represented as f64::INFINITY).
+pub fn allowed_burn(weight: f64, price: f64) -> f64 {
+    if price <= 0.0 {
+        f64::INFINITY
+    } else {
+        weight / price
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +100,42 @@ mod tests {
         // Interactive entrypoint but no user turn for 10 min → the "at lunch"
         // case → Background.
         assert_eq!(priority_of("claude-desktop", Some(now - 600_000), now, 120), Priority::Background);
+    }
+
+    #[test]
+    fn price_rises_over_target_and_falls_under() {
+        // Over target → price up.
+        let up = update_price(1.0, 800_000.0, 600_000.0, 1e-6);
+        assert!(up > 1.0, "over target should raise price, got {up}");
+        // Under target → price down.
+        let down = update_price(1.0, 400_000.0, 600_000.0, 1e-6);
+        assert!(down < 1.0, "under target should lower price, got {down}");
+    }
+
+    #[test]
+    fn price_never_negative() {
+        // Massively under target must clamp at 0, not go negative.
+        assert_eq!(update_price(0.0, 0.0, 600_000.0, 1e-3), 0.0);
+    }
+
+    #[test]
+    fn allowed_burn_is_proportional_to_weight() {
+        // Double the weight → double the allowed burn at the same price.
+        assert_eq!(allowed_burn(2.0, 0.5), 2.0 * allowed_burn(1.0, 0.5));
+    }
+
+    #[test]
+    fn loop_converges_to_target() {
+        // Simulate: each tick, everyone burns their allowed share; price should
+        // drive total burn toward target. One unit, weight 1.
+        let target = 600_000.0;
+        let mut price = 1e-6;
+        let eta = 1e-9;
+        let mut burn = 2_000_000.0; // start way over
+        for _ in 0..2000 {
+            price = update_price(price, burn, target, eta);
+            burn = allowed_burn(1.0, price); // the unit obeys its permit
+        }
+        assert!((burn - target).abs() / target < 0.05, "converged near target: {burn}");
     }
 }
