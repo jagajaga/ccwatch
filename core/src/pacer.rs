@@ -3,6 +3,7 @@
 //! fleet's burn and shares the budget fairly at once (Kelly NUM / dual mirror
 //! descent); an AIMD overlay handles the 429 shock. No enforcement here.
 
+use std::collections::HashSet;
 use crate::model::{Agent, PaceAction, PacingPlan, Priority, Session, Snapshot};
 
 /// Interactive entrypoints. A session on one of these, with a recent user turn,
@@ -285,6 +286,16 @@ pub fn plan(
     )
 }
 
+/// Given the pids the current plan wants paused and the set Cruise has already
+/// paused, return `(to_pause, to_resume)`: newly-named pids to pause, and
+/// already-paced pids no longer in the plan to resume (recovery). Pure.
+pub fn reconcile_paced(plan_pause: &[i32], paced: &HashSet<i32>) -> (Vec<i32>, Vec<i32>) {
+    let want: HashSet<i32> = plan_pause.iter().copied().collect();
+    let to_pause: Vec<i32> = plan_pause.iter().copied().filter(|p| !paced.contains(p)).collect();
+    let to_resume: Vec<i32> = paced.iter().copied().filter(|p| !want.contains(p)).collect();
+    (to_pause, to_resume)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +530,26 @@ mod tests {
         assert!(!json.contains("\"price\":null"), "price must not serialize to null");
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert!(back.pacing.is_some(), "snapshot with pacing must round-trip");
+    }
+
+    #[test]
+    fn reconcile_pauses_new_and_resumes_recovered() {
+        use std::collections::HashSet;
+        // Currently pacing pids {2,3}. The plan now wants {3,4}.
+        // → pause 4 (new), resume 2 (no longer in the plan), leave 3.
+        let paced: HashSet<i32> = [2, 3].into_iter().collect();
+        let (to_pause, to_resume) = reconcile_paced(&[3, 4], &paced);
+        assert_eq!(to_pause, vec![4]);
+        assert_eq!(to_resume, vec![2]);
+    }
+
+    #[test]
+    fn reconcile_empty_plan_resumes_all_paced() {
+        use std::collections::HashSet;
+        let paced: HashSet<i32> = [7, 8].into_iter().collect();
+        let (to_pause, mut to_resume) = reconcile_paced(&[], &paced);
+        to_resume.sort();
+        assert!(to_pause.is_empty());
+        assert_eq!(to_resume, vec![7, 8]);
     }
 }
