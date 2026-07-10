@@ -239,4 +239,7 @@ final class Store: ObservableObject {
     nonisolated func applyPacing() {
         client.sendAction(["msg": "action", "action": "apply_pacing"])
     }
+    nonisolated func setCruiseMode(_ mode: String) {
+        client.sendAction(["msg": "action", "action": "set_cruise_mode", "mode": mode])
+    }
 }

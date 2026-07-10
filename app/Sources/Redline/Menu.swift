@@ -30,6 +30,7 @@ struct MenuContent: View {
     @AppStorage("limit_mode") private var limitRaw = LimitMode.mix.rawValue
     @AppStorage("menu_show") private var showRaw = MenuShow.throttle.rawValue
     @AppStorage("start_menu_bar_only") private var menuBarOnly = false
+    @AppStorage("cruise_mode") private var cruiseMode = "off"
     @State private var showSettings = false
 
     var body: some View {
@@ -82,9 +83,18 @@ struct MenuContent: View {
                 Text("5h resets \(Fmt.clock(g.window.resetsAt)) · weekly resets \(Fmt.resetLabel(g.week?.resetsAt))")
                     .font(.caption2).foregroundStyle(.tertiary)
                 paceLine(g, snap.generatedAt)
-                // Cruise Control advisory (read-only in this step): if the pacer
-                // proposes pauses, show the first recommendation.
-                if let plan = snap.pacing, !plan.actions.isEmpty,
+                // Cruise Control advisory: when the daemon is autonomously pacing
+                // ("auto" mode), show the paced count with a one-key Release;
+                // otherwise (advisory-only), show the first recommendation with Apply.
+                if let plan = snap.pacing, plan.auto {
+                    HStack(spacing: 6) {
+                        Text("⚙︎ Cruise auto · \(plan.paced) paused")
+                            .font(.caption2).foregroundStyle(Palette.teal)
+                        Spacer()
+                        Button("Release") { store.setCruiseMode("off"); cruiseMode = "off" }
+                            .buttonStyle(.borderless).font(.caption2).foregroundStyle(Palette.teal)
+                    }
+                } else if let plan = snap.pacing, !plan.actions.isEmpty,
                    let first = plan.actions.first(where: { $0.op == "pause" })?.reason {
                     HStack(spacing: 6) {
                         Text("⏸ Cruise · \(first)")
@@ -200,6 +210,14 @@ struct MenuContent: View {
                 Picker("", selection: $showRaw) {
                     ForEach(MenuShow.allCases) { Text($0.seg).tag($0.rawValue) }
                 }.pickerStyle(.segmented).labelsHidden()
+            }
+            row("Cruise") {
+                Picker("", selection: $cruiseMode) {
+                    Text("Off").tag("off")
+                    Text("Advise").tag("advisory")
+                    Text("Auto").tag("auto")
+                }.pickerStyle(.segmented).labelsHidden()
+                .onChange(of: cruiseMode) { _, m in store.setCruiseMode(m) }
             }
             Toggle("Start with menu bar only", isOn: $menuBarOnly)
                 .font(.caption)

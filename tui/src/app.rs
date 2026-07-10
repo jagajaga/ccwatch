@@ -441,6 +441,19 @@ impl App {
         }
     }
 
+    /// Stage a release of autonomous Cruise Control (mode "off") for
+    /// confirmation, if the daemon currently has it enforcing a plan.
+    pub fn stage_release_cruise(&mut self) {
+        if let Some(p) = self.snapshot.pacing.as_ref() {
+            if p.auto {
+                self.mode = Mode::Confirm(PendingAction {
+                    request: ActionRequest::SetCruiseMode { mode: "off".into() },
+                    prompt: format!("Release Cruise auto ({} paused)? Resumes everything.", p.paced),
+                });
+            }
+        }
+    }
+
     /// Take the staged request (on confirm).
     pub fn take_pending(&mut self) -> Option<ActionRequest> {
         if let Mode::Confirm(p) = &self.mode {
@@ -723,6 +736,39 @@ mod tests {
             Some(ccwatch_core::ipc::ActionRequest::ApplyPacing) => {}
             other => panic!("expected ApplyPacing confirm, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn release_cruise_key_stages_set_cruise_mode_off_confirm_when_auto() {
+        use ccwatch_core::model::PacingPlan;
+        let mut snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        snap.pacing = Some(PacingPlan {
+            target_rate: 100_000.0,
+            actual_rate: 500_000.0,
+            price: 1e-5,
+            actions: vec![],
+            reason: "auto-pacing".into(),
+            auto: true,
+            paced: 3,
+        });
+        let mut app = app_with(snap);
+        app.stage_release_cruise();
+        match app.take_pending() {
+            Some(ccwatch_core::ipc::ActionRequest::SetCruiseMode { mode }) => {
+                assert_eq!(mode, "off")
+            }
+            other => panic!("expected SetCruiseMode {{ mode: \"off\" }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_cruise_key_noop_when_not_auto() {
+        // Not in auto mode (or no plan at all): the release key must not stage
+        // anything — there's nothing Cruise-paced to release.
+        let snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        let mut app = app_with(snap);
+        app.stage_release_cruise();
+        assert!(matches!(app.mode, Mode::Normal));
     }
 
     #[test]

@@ -38,6 +38,10 @@ struct PacingPlan: Decodable {
     var price: Double = 0
     var actions: [PaceAction] = []
     var reason: String = ""
+    /// True when the daemon is autonomously enforcing this plan (mode "auto").
+    var auto: Bool = false
+    /// How many sessions Cruise currently has paused (autonomous mode).
+    var paced: Int = 0
 }
 
 struct Tank: Decodable {

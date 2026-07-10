@@ -158,6 +158,7 @@ fn handle_key(app: &mut App, paths: &Paths, code: KeyCode) {
             KeyCode::Char('p') => app.stage_action(ActionKind::Pause),
             KeyCode::Char('r') => app.stage_action(ActionKind::Resume),
             KeyCode::Char('C') => app.stage_apply_pacing(),
+            KeyCode::Char('X') => app.stage_release_cruise(),
             KeyCode::Char('f') => {
                 app.hide_idle = !app.hide_idle;
                 app.move_selection(0); // clamp selection to new list length

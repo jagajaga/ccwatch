@@ -81,10 +81,15 @@ fn governor_estimated(app: &App) -> bool {
     !reported(&g.window) && g.week.as_ref().is_none_or(|w| !reported(w))
 }
 
-/// A one-line Cruise Control recommendation when the pacing plan proposes pauses.
-/// Advisory only — nothing is executed. `None` when there's no plan or nothing to do.
+/// A one-line Cruise Control status: when the daemon is autonomously enforcing
+/// the plan ("auto" mode), the live paced count (press X to release); otherwise
+/// an advisory-only recommendation when the pacing plan proposes pauses.
+/// `None` when there's no plan or nothing to report.
 fn pacing_advisory(app: &App) -> Option<String> {
     let p = app.snapshot.pacing.as_ref()?;
+    if p.auto {
+        return Some(format!("Cruise AUTO · {} paused (X to release)", p.paced));
+    }
     if p.actions.is_empty() {
         return None;
     }
@@ -757,12 +762,23 @@ fn agent_details(a: &ccwatch_core::model::Agent, s: &Session, app: &App) -> Vec<
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-    let hint = match &app.mode {
-        Mode::Fuzzy { .. } => " type to filter · ↑↓ move · enter jump · esc cancel ",
-        Mode::Confirm(_) => " y confirm · n/esc cancel ",
-        Mode::Details => " esc/d close ",
+    let hint: String = match &app.mode {
+        Mode::Fuzzy { .. } => " type to filter · ↑↓ move · enter jump · esc cancel ".into(),
+        Mode::Confirm(_) => " y confirm · n/esc cancel ".into(),
+        Mode::Details => " esc/d close ".into(),
         Mode::Normal => {
-            " / jump · ↑↓ · enter expand · d details · s sort · x hide-done · f hide-idle · k kill · p pause · r resume · C cruise · q quit "
+            // The release key only ever does something in autonomous mode, and
+            // manually applying the plan (`C`) is moot once the daemon is
+            // already enforcing it — swap one hint for the other so the
+            // footer stays a single line at typical terminal widths.
+            let cruise_hint = if app.snapshot.pacing.as_ref().is_some_and(|p| p.auto) {
+                "X release"
+            } else {
+                "C cruise"
+            };
+            format!(
+                " / jump · ↑↓ · enter expand · d details · s sort · x hide-done · f hide-idle · k kill · p pause · r resume · {cruise_hint} · q quit "
+            )
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::Black).bg(Color::Gray))];
@@ -1045,6 +1061,26 @@ mod tests {
         let s = render(&app);
         assert!(s.contains("Cruise"), "advisory label missing:\n{s}");
         assert!(s.contains("fleet score_v3 (52 agents)"), "recommendation missing:\n{s}");
+    }
+
+    #[test]
+    fn renders_cruise_auto_state_and_release_hint() {
+        use ccwatch_core::model::PacingPlan;
+        let mut snap = snapshot(vec![session("s1", "webapp", vec![])]);
+        snap.pacing = Some(PacingPlan {
+            target_rate: 100_000.0,
+            actual_rate: 500_000.0,
+            price: 1.0e-5,
+            actions: vec![],
+            reason: "auto-pacing".into(),
+            auto: true,
+            paced: 3,
+        });
+        let app = app_with(snap);
+        let s = render(&app);
+        assert!(s.contains("Cruise AUTO"), "auto-mode label missing:\n{s}");
+        assert!(s.contains("3 paused"), "paced count missing:\n{s}");
+        assert!(s.contains("X release"), "footer release hint missing:\n{s}");
     }
 
     /// Map a ratatui color to a hex string (catppuccin-ish palette), given the
