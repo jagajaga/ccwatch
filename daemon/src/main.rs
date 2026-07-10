@@ -430,6 +430,12 @@ fn main() -> anyhow::Result<()> {
                     p.paced = c.paced.len();
                     p.paused_rate = held;
                 }
+                // "off" means Cruise is disabled: emit NO plan at all, so no client
+                // shows an advisory, Apply button, or paced count. (Advisory shows
+                // only in "advisory"/"auto"; enforcement runs only in "auto".)
+                if c.mode == "off" {
+                    snap.pacing = None;
+                }
             }
             snap
         };
