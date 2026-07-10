@@ -12,10 +12,12 @@ runs out early — by throttling **background/autonomous** work (workflow agent
 fleets, `/loop`s, overnight servers), never the session the user is actively
 typing in.
 
-It borrows directly from network QoS and ad-budget pacing: a target rate
-(bandwidth control), weighted fair-share across sessions (WFQ/DRR), priority
-tiers (DSCP), a PID-style control loop with hysteresis (ad budget pacing / CoDel),
-and an AIMD panic-brake on a 429 (TCP congestion control).
+It borrows directly from network QoS, congestion control, and ad-budget pacing:
+a target rate (bandwidth control), priority tiers (DSCP), and — at its core — a
+single **dual-price controller** (Kelly's Network Utility Maximization; the
+regret-optimal dual-mirror-descent method from budget pacing) that paces the
+fleet *and* shares the budget fairly at once, converging to proportional
+fairness. An **AIMD** panic-brake handles the 429 shock (TCP congestion control).
 
 ## Motivation
 
@@ -83,14 +85,21 @@ All figures are billable Opus-equivalent tokens, consistent with the tanks.
 Overrides live in config (`cruise.priority` by session name/cwd) and as a
 right-click / key action in the UI.
 
-### Weighted fair-share (WFQ / DRR)
+### Fairness — proportional, via one price
 
-The `target_rate` is divided among active throttle-eligible sessions in
-proportion to a weight (default equal; priority raises weight). A session's
-*share* is its slice of the target. Idle sessions' shares are redistributed to
-active ones (DRR's "unused bandwidth is divided among remaining flows"). The
-planner throttles the session/agent **most over its share first**, so one
-runaway fleet is reined in before well-behaved work is touched.
+Pacing and fairness are the *same* problem: maximise useful work subject to
+`Σ burn ≤ target_rate`. Kelly's Network Utility Maximization solves it with a
+single scalar **pace price** `λ` (the Lagrange multiplier on the budget). Each
+eligible session's allowed burn is `weight / λ` (priority raises `weight`), so:
+
+- raising `λ` throttles everyone, the heaviest / lowest-priority most;
+- idle sessions draw ≈0 and their budget flows to active ones automatically — no
+  explicit redistribution step;
+- the fixed point is **proportional fairness** — the principled objective WFQ
+  only approximates.
+
+One scalar replaces both a per-session fair-queuing scheduler and a separate
+pacing loop.
 
 ## The actuator
 
@@ -116,16 +125,25 @@ the chosen pids; no new privilege.
 Runs in the daemon (Autonomous mode) and is *computed* (but not applied) in
 Advisory/One-click so the UI can show the plan.
 
-### Normal regime — proportional + hysteresis
+### Normal regime — dual-price (mirror descent)
 
-- `error = actual_burn − target_rate` over the recent rate window.
-- **Over target** beyond a hysteresis band for a sustained interval (CoDel-style
-  "persistently above threshold", not a single spike): shed the most-over-share
-  Background agents/sessions until the *projected* burn ≤ target.
-- **Under target** with paused work outstanding: resume additively (one/few at a
-  time), lowest-priority-last-paused first, so we ramp back without overshoot.
-- Hysteresis band + minimum dwell time between actions prevent pause/resume
-  flapping.
+One state variable, the pace price `λ`, updated each snapshot by dual gradient
+ascent:
+
+```
+λ ← max(0, λ + η · (actual_burn − target_rate))
+```
+
+- `λ` rises when over target, falls when under — a smooth, self-tuning integral
+  controller with a single step-size `η`. No three PID gains, and no integral
+  windup: when the actuator *saturates* (only the exempt foreground is left),
+  `λ` simply settles higher and the planner takes no illegal action.
+- The price maps to an **allowed concurrency per fleet**: `permits =
+  round(weight / λ)` agents may run; the planner pauses the rest (preferring
+  agents *between* turns). This quantises the continuous price onto the discrete
+  actuator cleanly.
+- A **dead-band** on `permits` changes plus a minimum dwell time between actions
+  prevents pause/resume flapping.
 
 ### 429 regime — AIMD panic-brake
 
@@ -136,8 +154,8 @@ and protects against a wall that the smooth loop is too slow for.
 
 ## Progressive rollout (three modes, one policy)
 
-The planner (`plan(snapshot, config) -> PacingPlan`) is pure and shared. Modes
-differ only in what happens to the plan:
+The planner (`plan(snapshot, config, state) -> (PacingPlan, PacerState)`) is pure
+and shared. Modes differ only in what happens to the plan:
 
 1. **Advisory.** Render it: a burn-down chart (actual vs. the target trajectory),
    the current `target_rate`, and the concrete recommendation ("2.1× over — pause
@@ -151,11 +169,13 @@ differ only in what happens to the plan:
 
 ## Architecture
 
-- **`core/src/pacer.rs` (new).** Pure policy: `target_rate`, tiering, fair-share,
-  and `plan(snapshot, config, prev_state) -> PacingPlan { actions: Vec<PaceAction>,
-  target_rate, per_session_share, reason }`. Deterministic and unit-testable with
-  fixture snapshots, like `governor.rs`. Holds hysteresis/AIMD state passed in and
-  out (no wall clock inside; `now_ms` is an argument).
+- **`core/src/pacer.rs` (new).** Pure policy: `target_rate`, tiering, and the
+  dual-price controller. `plan(snapshot, config, prev_state) -> (PacingPlan,
+  PacerState)`, where `PacerState` is the scalar price `λ` plus AIMD bookkeeping,
+  threaded in and out. Deterministic, no wall clock inside (`now_ms` is an
+  argument), unit-testable with fixture snapshots like `governor.rs`. The plan
+  carries `actions: Vec<PaceAction>`, `target_rate`, `price`, per-fleet `permits`,
+  and a human `reason`.
 - **`daemon`.** In Autonomous mode a loop calls `plan(...)` each refresh and
   executes `PaceAction`s via the existing action path; writes an action-log line
   per change. Advisory/One-click compute the plan and ship it in the snapshot.
@@ -199,9 +219,11 @@ differ only in what happens to the plan:
 ## Testing
 
 - `pacer.rs` unit tests over fixture snapshots (like `governor`/`engine` tests):
-  coast setpoint math; reservation/deadline setpoint; fair-share division and
-  idle redistribution; over-target sheds most-over-share first; foreground never
-  in the plan; hysteresis (no action inside band); AIMD cut on 429 then ramp.
+  coast setpoint math; reservation/deadline setpoint; the price loop converges so
+  burn settles at target; proportional fairness (double a session's weight → ≈2×
+  its permits); idle sessions draw ≈0; saturation (only foreground left → `λ`
+  rises, no action, no windup); dead-band (no flap on small changes); AIMD cut on
+  429 then additive ramp; foreground never appears in the plan.
 - Daemon integration test: Autonomous mode applies and reverses actions against a
   fixture fleet; action log written.
 - Manual end-to-end (verify skill): drive a real background workflow over target
@@ -232,11 +254,15 @@ Each step ships independently and is useful on its own.
   CAKE" (arXiv 1804.07617).
 - Fair queuing: WFQ / Deficit Round Robin — Wikipedia "Fair queuing"; intronetworks
   ch. 23.
-- Congestion control as rate limiting: AIMD, Netflix concurrency-limits,
-  ThomWright/congestion-limiter.
-- Ad budget pacing: probabilistic throttling + PID control — arXiv 2503.06942
-  ("A Practical Guide to Budget Pacing Algorithms"); "Feedback Control for Small
-  Budget Pacing" (arXiv 2509.25429).
+- Congestion control as rate limiting: AIMD (Chiu–Jain fairness/efficiency
+  convergence), Netflix concurrency-limits, ThomWright/congestion-limiter.
+- **The unifying theory (the core algorithm):** Kelly's Network Utility
+  Maximization — the price/dual decomposition that TCP distributedly approximates;
+  Balseiro–Lu–Mirrokni, "Dual Mirror Descent for Online Allocation Problems"
+  (regret-optimal budget pacing — the same λ update).
+- Ad budget pacing: probabilistic throttling + PID (the pragmatic baseline we are
+  improving on) — arXiv 2503.06942 ("A Practical Guide to Budget Pacing
+  Algorithms"); "Feedback Control for Small Budget Pacing" (arXiv 2509.25429).
 - LLM fleets: token-based (not request-based) limiting, multi-window budgets,
   per-agent buckets, burn-rate auto-throttle — TrueFoundry / Zuplo / AI Security
   Gateway write-ups.
