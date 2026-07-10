@@ -130,7 +130,7 @@ mod tests {
         // drive total burn toward target. One unit, weight 1.
         let target = 600_000.0;
         let mut price = 1e-6;
-        let eta = 1e-9;
+        let eta = 1e-12;
         let mut burn = 2_000_000.0; // start way over
         for _ in 0..2000 {
             price = update_price(price, burn, target, eta);
