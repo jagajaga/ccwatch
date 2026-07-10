@@ -34,6 +34,19 @@ const DEFAULT_REMOTE_SECS: u64 = 15;
 
 type SharedSnapshot = Arc<RwLock<Arc<Snapshot>>>;
 
+/// Runtime state for Cruise Control's autonomous enforcement: the live mode
+/// (only "auto" ever pauses anything) and the set of pids Cruise itself has
+/// paused (so it — and only it — can release them).
+#[derive(Default)]
+struct CruiseRuntime {
+    mode: String, // "off" | "advisory" | "oneclick" | "auto"
+    paced: std::collections::HashSet<i32>,
+    #[allow(dead_code)]
+    last_log: Option<String>,
+}
+
+type SharedCruise = Arc<std::sync::Mutex<CruiseRuntime>>;
+
 fn main() -> anyhow::Result<()> {
     let paths = Paths::discover();
 
@@ -97,6 +110,14 @@ fn main() -> anyhow::Result<()> {
     // Shared latest snapshot, updated by the refresher thread.
     let shared: SharedSnapshot = Arc::new(RwLock::new(Arc::new(Snapshot::empty(0))));
 
+    // Cruise Control runtime state: default OFF unless config says otherwise.
+    // Seeded from config now; updated at runtime only via `SetCruiseMode`.
+    let cruise_config = Config::load(&paths.config_file());
+    let cruise: SharedCruise = Arc::new(std::sync::Mutex::new(CruiseRuntime {
+        mode: cruise_config.cruise_mode.clone(),
+        ..Default::default()
+    }));
+
     // Remote/cloud hosts: fetched on their own cadence, cached, merged in.
     let remote_defs = remote::load_remotes(&paths.remotes_file());
     if !remote_defs.is_empty() {
@@ -129,6 +150,7 @@ fn main() -> anyhow::Result<()> {
     });
     {
         let shared = shared.clone();
+        let cruise = cruise.clone();
         let config = Config::load(&paths.config_file());
         let paths2 = paths.clone();
         let remote_cache = remote_cache.clone();
@@ -201,7 +223,12 @@ fn main() -> anyhow::Result<()> {
             }
             snap.governor = Some(g);
 
-            let saw_429 = false; // Step 1: no 429 threading yet; Autonomous step wires this.
+            // A fresh 429 within the last ~2 min is a hard AIMD signal; `rate_limits`
+            // is the governor's own list of 429 epoch-ms timestamps, already in scope.
+            let saw_429 = snap
+                .rate_limits
+                .iter()
+                .any(|t| snap.generated_at - t < 120_000);
             let (plan, next_state) = ccwatch_core::pacer::plan(
                 &snap,
                 &config.pacer_config(),
@@ -211,6 +238,30 @@ fn main() -> anyhow::Result<()> {
             );
             pacer_state = next_state;
             snap.pacing = Some(plan);
+
+            // Autonomous enforcement — ONLY in "auto". Otherwise leave the plan
+            // advisory and make sure nothing stays paced.
+            {
+                let mut c = cruise.lock().unwrap();
+                let plan_pause = snap.pacing.as_ref().map(|p| p.pause_pids()).unwrap_or_default();
+                let auto = c.mode == "auto";
+                let target_pause: Vec<i32> = if auto { plan_pause } else { Vec::new() };
+                let (to_pause, to_resume) =
+                    ccwatch_core::pacer::reconcile_paced(&target_pause, &c.paced);
+                for pid in to_resume {
+                    let _ = ccwatch_core::actions::resume(pid);
+                    c.paced.remove(&pid);
+                }
+                for pid in to_pause {
+                    if matches!(ccwatch_core::actions::pause(pid), ccwatch_core::actions::ActionOutcome::Ok(_)) {
+                        c.paced.insert(pid);
+                    }
+                }
+                if let Some(p) = snap.pacing.as_mut() {
+                    p.auto = auto;
+                    p.paced = c.paced.len();
+                }
+            }
             snap
         };
         let engine_config = Config::load(&paths.config_file());
@@ -238,10 +289,11 @@ fn main() -> anyhow::Result<()> {
                 let tick_tx = tick_tx.clone();
                 let remote_defs = remote_defs.clone();
                 let subscribers = subscribers.clone();
+                let cruise = cruise.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) =
-                        handle_client(stream, shared, paths, tick_tx, remote_defs, subscribers)
-                    {
+                    if let Err(e) = handle_client(
+                        stream, shared, paths, tick_tx, remote_defs, subscribers, cruise,
+                    ) {
                         eprintln!("client error: {e}");
                     }
                 });
@@ -284,6 +336,7 @@ fn handle_client(
     tick_tx: Sender<()>,
     remote_defs: Arc<Vec<RemoteDef>>,
     subscribers: Arc<AtomicUsize>,
+    cruise: SharedCruise,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -312,7 +365,7 @@ fn handle_client(
         }
         ClientMsg::Action(req) => {
             let snapshot = shared.read().unwrap().clone();
-            let outcome = execute_action(&req, &paths, &remote_defs, &snapshot);
+            let outcome = execute_action(&req, &paths, &remote_defs, &snapshot, &cruise);
             let (ok, message) = match outcome {
                 ActionOutcome::Ok(m) => (true, m),
                 ActionOutcome::Failed(m) => (false, m),
@@ -362,6 +415,7 @@ fn execute_action(
     _paths: &Paths,
     remote_defs: &[RemoteDef],
     snapshot: &Snapshot,
+    cruise: &SharedCruise,
 ) -> ActionOutcome {
     match req {
         ActionRequest::KillSession { pid } => actions::terminate_session(*pid, KILL_GRACE),
@@ -389,6 +443,20 @@ fn execute_action(
                 }
             }
             ActionOutcome::Ok(format!("Cruise: paused {paused} background session(s)"))
+        }
+        ActionRequest::SetCruiseMode { mode } => {
+            let mut c = cruise.lock().unwrap();
+            c.mode = mode.clone();
+            let mut released = 0usize;
+            if mode != "auto" {
+                // Release: resume everything Cruise paused.
+                for pid in c.paced.drain().collect::<Vec<_>>() {
+                    if matches!(actions::resume(pid), ActionOutcome::Ok(_)) {
+                        released += 1;
+                    }
+                }
+            }
+            ActionOutcome::Ok(format!("Cruise mode = {mode}; released {released}"))
         }
     }
 }
@@ -529,5 +597,21 @@ mod pacing_tests {
         );
         assert_eq!(st.price, 0.5, "price carried through when no governor");
         assert!(planr.actions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cruise_tests {
+    use ccwatch_core::pacer::reconcile_paced;
+    use std::collections::HashSet;
+
+    #[test]
+    fn off_mode_releases_all_by_resuming_every_paced_pid() {
+        // Turning cruise off (or any non-auto mode) is modeled as "plan wants
+        // nothing paused" → reconcile resumes every paced pid.
+        let paced: HashSet<i32> = [11, 12, 13].into_iter().collect();
+        let (to_pause, to_resume) = reconcile_paced(&[], &paced);
+        assert!(to_pause.is_empty());
+        assert_eq!(to_resume.len(), 3);
     }
 }

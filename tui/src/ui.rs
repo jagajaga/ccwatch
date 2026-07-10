@@ -1038,6 +1038,8 @@ mod tests {
                 reason: "pause fleet score_v3 (52 agents): 300000/min (value-density 1.0e-5)".into(),
             }],
             reason: "500000 over target → pausing 1 background session(s)".into(),
+            auto: false,
+            paced: 0,
         });
         let app = app_with(snap);
         let s = render(&app);

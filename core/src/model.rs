@@ -128,6 +128,12 @@ pub struct PacingPlan {
     pub price: f64,
     pub actions: Vec<PaceAction>,
     pub reason: String,
+    /// True when the daemon is autonomously enforcing this plan (mode "auto").
+    #[serde(default)]
+    pub auto: bool,
+    /// How many sessions Cruise currently has paused (autonomous mode).
+    #[serde(default)]
+    pub paced: usize,
 }
 
 impl PacingPlan {
@@ -592,6 +598,8 @@ mod tests {
                 PaceAction::Pause { pid: 30, reason: "b".into() },
             ],
             reason: String::new(),
+            auto: false,
+            paced: 0,
         };
         assert_eq!(plan.pause_pids(), vec![10, 30]);
     }

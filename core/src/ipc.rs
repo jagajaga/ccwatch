@@ -28,6 +28,9 @@ pub enum ActionRequest {
     CancelRemote { remote: String, id: String },
     /// Apply the daemon's current pacing plan once: pause every session it named.
     ApplyPacing,
+    /// Set Cruise Control mode at runtime: "off" | "advisory" | "oneclick" | "auto".
+    /// Any non-"auto" value releases everything Cruise paused.
+    SetCruiseMode { mode: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

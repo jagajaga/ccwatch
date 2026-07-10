@@ -714,6 +714,8 @@ mod tests {
                 reason: "x".into(),
             }],
             reason: "over".into(),
+            auto: false,
+            paced: 0,
         });
         let mut app = app_with(snap);
         app.stage_apply_pacing();
