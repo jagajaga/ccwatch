@@ -267,7 +267,15 @@ pub fn plan(
     // `Normal` non-fleets. Within a tier, pause the lowest value-density
     // (`weight/burn`) first. Only act when over target by more than the dead-band
     // (anti-flap). `price` = the value-density at the cut (λ).
-    let over = target > 0.0 && actual > target * (1.0 + cfg.dead_band);
+    // Over pace = burning faster than we may. With a positive target that's
+    // `actual > target` (plus a dead-band to avoid flapping). When `target == 0`
+    // — fully reserved, or past the deadline — there is NO budget to spend, so any
+    // burn at all is over: the most over-budget state must shed, not coast.
+    let over = if target > 0.0 {
+        actual > target * (1.0 + cfg.dead_band)
+    } else {
+        actual > 0.0
+    };
     let mut actions = Vec::new();
     let mut price = 0.0;
     if over {
@@ -653,6 +661,25 @@ mod tests {
         assert!(
             matches!(&planr.actions[0], PaceAction::Pause { pid, .. } if *pid == 60),
             "a user-pinned Low session must shed before a Normal fleet"
+        );
+    }
+
+    #[test]
+    fn zero_target_still_sheds_a_burner() {
+        // Fully reserved (reserve ≥ remaining) → target 0. Any burn is over budget,
+        // so a non-High burner must still be paused — the most over-budget state
+        // must never read as coasting.
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        // reserve everything → spendable 0 → target 0
+        let cfg = PacerConfig { reserve: u64::MAX, ..PacerConfig::default() };
+        snap.sessions = vec![sess("bg", 20, "loop", None, 100_000.0)];
+        let (planr, _) = plan(&snap, &cfg, PacerState { price: 0.0 }, now, false);
+        assert_eq!(planr.target_rate, 0.0, "target should be 0 when fully reserved");
+        assert!(
+            planr.pause_pids().contains(&20),
+            "a burner must be paused even at target 0, not treated as coasting"
         );
     }
 
