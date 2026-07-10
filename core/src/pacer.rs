@@ -222,12 +222,17 @@ pub fn plan(
     // have a live pid (foreground / High is excluded before we ever plan). Each
     // knows whether it's a fleet and carries a human label so every action reads
     // the way the user thinks. Zero-burn sessions are excluded: pausing one does
-    // nothing, and its infinite value-density would poison the cut price.
+    // nothing, and its infinite value-density would poison the cut price. A
+    // Remote/Cloud session's pid lives on a DIFFERENT machine — `actions::pause`
+    // is a local `kill(pid, SIGSTOP)`, so actuating on a remote pid would freeze
+    // an arbitrary local process that happens to share the number. Only Local
+    // sessions are actuatable.
     let mut candidates: Vec<Candidate> = snap
         .sessions
         .iter()
         .filter(|s| {
             s.tokens_per_min > 0.0
+                && matches!(s.host, crate::model::Host::Local)
                 && priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
                     == Priority::Background
         })
@@ -512,6 +517,30 @@ mod tests {
             matches!(&planr.actions[0], PaceAction::Pause { pid, .. } if *pid == 40),
             "the low-burn fleet must pause before the bigger non-fleet loop"
         );
+    }
+
+    #[test]
+    fn remote_sessions_are_never_selected_for_pause() {
+        // `actions::pause` is a local `kill(pid, SIGSTOP)` — a Remote session's
+        // pid belongs to a DIFFERENT machine, so pausing it would SIGSTOP an
+        // arbitrary local process that happens to reuse that pid number. Only
+        // Local sessions may ever be pause candidates.
+        use crate::model::Host;
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        let mut remote = sess("remoteLoop", 99, "loop", now - 5_000, 300_000.0);
+        remote.host = Host::Remote { name: "r".into(), ssh_target: "u@h".into() };
+        snap.sessions = vec![
+            sess("localLoop", 20, "loop", now - 5_000, 300_000.0), // local background
+            remote,                                                // remote background — must never pause
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+
+        assert!(!planr.actions.is_empty(), "expected the local session to be paced");
+        let paused = planr.pause_pids();
+        assert!(paused.contains(&20), "the local pid should be a pause candidate");
+        assert!(!paused.contains(&99), "a remote pid must never be selected for pause");
     }
 
     #[test]

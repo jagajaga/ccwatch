@@ -158,7 +158,9 @@ fn main() -> anyhow::Result<()> {
     // Seeded from config now; updated at runtime only via `SetCruiseMode`.
     let cruise_config = Config::load(&paths.config_file());
     let cruise: SharedCruise = Arc::new(std::sync::Mutex::new(CruiseRuntime {
-        mode: cruise_config.cruise_mode.clone(),
+        // Normalize the same way `SetCruiseMode` does, so `cruise_mode = "Auto"`
+        // in config.toml engages auto instead of silently acting as off.
+        mode: cruise_config.cruise_mode.trim().to_lowercase(),
         ..Default::default()
     }));
 
@@ -295,10 +297,15 @@ fn main() -> anyhow::Result<()> {
                 let (to_pause, to_resume) =
                     ccwatch_core::pacer::reconcile_paced(&target_pause, &c.paced);
                 for pid in to_resume {
-                    // Only untrack on a successful resume — a failed SIGCONT must
+                    // Untrack on a successful resume — a failed SIGCONT must
                     // stay tracked so the next tick retries it (never leave a live
-                    // session frozen and forgotten).
-                    if matches!(ccwatch_core::actions::resume(pid), ccwatch_core::actions::ActionOutcome::Ok(_)) {
+                    // session frozen and forgotten) — UNLESS the process is no
+                    // longer alive, in which case retrying forever would just be
+                    // a failing syscall every tick and a `paced` count stuck on a
+                    // dead pid: also untrack those.
+                    if matches!(ccwatch_core::actions::resume(pid), ccwatch_core::actions::ActionOutcome::Ok(_))
+                        || !ccwatch_core::actions::alive(pid)
+                    {
                         c.paced.remove(&pid);
                     }
                 }
@@ -490,11 +497,17 @@ fn execute_action(
                 .map(|p| p.pause_pids())
                 .unwrap_or_default();
             let mut paused = 0usize;
+            let mut c = cruise.lock().unwrap();
             for pid in pids {
                 if matches!(actions::pause(pid), ActionOutcome::Ok(_)) {
                     paused += 1;
+                    // Register the pid as Cruise-paced (same as auto mode) so
+                    // it's releasable via SetCruiseMode/Release and survives a
+                    // daemon restart via the startup sweep.
+                    c.paced.insert(pid);
                 }
             }
+            persist_paced(paths, &c.paced);
             ActionOutcome::Ok(format!("Cruise: paused {paused} background session(s)"))
         }
         ActionRequest::SetCruiseMode { mode } => {
@@ -511,7 +524,10 @@ fn execute_action(
                 // (target_pause=[] → to_resume includes everything still paced).
                 let pids: Vec<i32> = c.paced.iter().copied().collect();
                 for pid in pids {
-                    if matches!(actions::resume(pid), ActionOutcome::Ok(_)) {
+                    // Same dead-pid escape hatch as the refresher's resume loop:
+                    // a pid whose process has exited would otherwise fail resume
+                    // forever and stay stuck in `paced`.
+                    if matches!(actions::resume(pid), ActionOutcome::Ok(_)) || !actions::alive(pid) {
                         c.paced.remove(&pid);
                         released += 1;
                     }
