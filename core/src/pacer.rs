@@ -175,6 +175,11 @@ impl Default for PacerConfig {
 /// primitives `update_price` / `aimd_on_429` provide the smooth continuous price
 /// for a future finer-grained actuator; the discrete knapsack here is exact and
 /// immediate.)
+///
+/// Note the price semantics: `price` (and `PacerState.price`) is the value-density
+/// at the knapsack cut (`weight/burn`), NOT the mirror-descent λ from
+/// `update_price`. A future continuous controller must not seed `update_price` with
+/// it — the two are different quantities that happen to share the `λ` name.
 pub fn plan(
     snap: &Snapshot,
     cfg: &PacerConfig,
@@ -210,15 +215,18 @@ pub fn plan(
         target /= cfg.aimd_cut.max(1.0);
     }
 
-    // Candidate throttle units = Background sessions with a live pid (foreground /
-    // High is excluded before we ever plan). Each knows whether it's a fleet and
-    // carries a human label so every action reads the way the user thinks.
+    // Candidate throttle units = Background sessions that are actually burning and
+    // have a live pid (foreground / High is excluded before we ever plan). Each
+    // knows whether it's a fleet and carries a human label so every action reads
+    // the way the user thinks. Zero-burn sessions are excluded: pausing one does
+    // nothing, and its infinite value-density would poison the cut price.
     let mut candidates: Vec<Candidate> = snap
         .sessions
         .iter()
         .filter(|s| {
-            priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
-                == Priority::Background
+            s.tokens_per_min > 0.0
+                && priority_of(&s.entrypoint, s.last_activity, now_ms, cfg.idle_secs)
+                    == Priority::Background
         })
         .filter_map(|s| {
             let pid = s.pid?;
@@ -267,6 +275,10 @@ pub fn plan(
     } else {
         format!("{} over target → pausing {} background session(s)", actual as u64, actions.len())
     };
+    // Never report a non-finite price: it serializes to JSON `null` and the client
+    // (non-optional f64) drops the whole snapshot. Zero-burn candidates are already
+    // excluded, so this is defensive.
+    let price = price.min(MAX_PRICE);
     (
         PacingPlan { target_rate: target, actual_rate: actual, price, actions, reason },
         PacerState { price },
@@ -487,5 +499,25 @@ mod tests {
             matches!(&planr.actions[0], PaceAction::Pause { pid, .. } if *pid == 40),
             "the low-burn fleet must pause before the bigger non-fleet loop"
         );
+    }
+
+    #[test]
+    fn price_is_finite_and_snapshot_round_trips_with_an_idle_candidate() {
+        // An idle (0 tok/min) Background session must not make price INFINITY
+        // (which serializes to null and drops the whole snapshot on the client).
+        let now = 1_000_000_000_000;
+        let mut snap = Snapshot::empty(now);
+        snap.governor = Some(GovernorStatus { window: tank_over_target(now), week: None });
+        snap.sessions = vec![
+            sess("burner", 20, "loop", now - 5_000, 300_000.0),
+            sess("idle", 21, "loop", now - 5_000, 0.0), // idle background, pid present
+        ];
+        let (planr, _) = plan(&snap, &PacerConfig::default(), PacerState { price: 0.0 }, now, false);
+        assert!(planr.price.is_finite(), "price must stay finite, got {}", planr.price);
+        snap.pacing = Some(planr);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("\"price\":null"), "price must not serialize to null");
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert!(back.pacing.is_some(), "snapshot with pacing must round-trip");
     }
 }
