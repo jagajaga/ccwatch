@@ -53,13 +53,30 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
+// Ensure the recurring poll alarm exists, WITHOUT resetting its 2-min timer on
+// every event-page wake (unconditional create would keep pushing the next fire
+// out, so it'd never run). Firefox drops alarms across a browser restart and
+// suspends its event page harder than Chrome; `onStartup` used to only poll
+// once and never re-armed the alarm, so after a restart the extension went
+// silent in the background. Re-arm it on install, on startup, and on load.
+async function ensureAlarm() {
+  const existing = await api.alarms.get("poll");
+  if (!existing) api.alarms.create("poll", { periodInMinutes: PERIOD_MIN });
+}
+
 api.runtime.onInstalled.addListener(() => {
-  api.alarms.create("poll", { periodInMinutes: PERIOD_MIN });
+  ensureAlarm();
   poll();
 });
-if (api.runtime.onStartup) api.runtime.onStartup.addListener(poll);
+if (api.runtime.onStartup) {
+  api.runtime.onStartup.addListener(() => {
+    ensureAlarm();
+    poll();
+  });
+}
 api.alarms.onAlarm.addListener((a) => {
   if (a.name === "poll") poll();
 });
-// Poke once when the worker spins up.
+// Poke once when the worker/event page spins up, and make sure the alarm is armed.
+ensureAlarm();
 poll();

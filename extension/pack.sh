@@ -28,10 +28,23 @@ echo "chrome  -> $CZIP"
 : "${AMO_API_KEY:=${WEB_EXT_API_KEY:-}}"
 : "${AMO_API_SECRET:=${WEB_EXT_API_SECRET:-}}"
 if [ -n "${AMO_API_KEY:-}" ] && [ -n "${AMO_API_SECRET:-}" ]; then
+  # Build a Firefox-specific source: background as an EVENT PAGE only (drop
+  # `service_worker`). Firefox's extension service-worker background is gated /
+  # unreliable; the `scripts` event page is the supported, reliable path, and
+  # its alarms wake it in the background. Chrome keeps the service_worker.
+  FFSRC="$(mktemp -d)"
+  cp -R "$DIR"/. "$FFSRC"/
+  python3 - "$FFSRC/manifest.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p))
+m["background"] = {"scripts": ["background.js"]}
+json.dump(m, open(p, "w"), indent=2)
+PY
   # Non-fatal: AMO rejects re-signing an already-signed version, and we don't
   # want that to fail a whole release. Bump the version to get a fresh sign.
   if npx --yes web-ext@latest sign \
-    --source-dir="$DIR" \
+    --source-dir="$FFSRC" \
     --channel=unlisted \
     --api-key="$AMO_API_KEY" \
     --api-secret="$AMO_API_SECRET" \
@@ -42,6 +55,7 @@ if [ -n "${AMO_API_KEY:-}" ] && [ -n "${AMO_API_SECRET:-}" ]; then
   else
     echo "firefox -> signing failed (version $VER already on AMO?) — Chrome zip still produced"
   fi
+  rm -rf "$FFSRC"
 else
   echo "firefox -> skipped (set AMO_API_KEY + AMO_API_SECRET to sign the .xpi)"
 fi
